@@ -9,7 +9,7 @@ Everything runs on the engineer's own machine through [Ollama](https://ollama.co
 | Tool | Engineering problem | What it produces | Status |
 | :--- | :--- | :--- | :--- |
 | **[drawing-audit](drawing-audit/)** | One drawing: typos, contradictions in the title block, title block vs BOM mismatches | Markdown report with severity-ranked findings, extracted title block and BOM, and the model's reasoning trace | Complete pipeline |
-| **[dimcheck](dimcheck/)** | Filling the Tolerance column of a dimension inspection checklist by hand | Filled checklist `.docx` plus a per-row CSV saying where each tolerance came from and how confident the match is | Core modules present; dimension matcher module not yet in this repo |
+| **[dimcheck](dimcheck/)** | Filling the Tolerance column of a dimension inspection checklist by hand | Filled checklist `.docx` plus a per-row CSV saying where each tolerance came from and how confident the match is | Complete pipeline |
 | **[coherence](coherence/)** | A set of drawings and documents for one product that disagree with each other | Cross-file report: revision, date and title conflicts, missing BOM drawings, broken `NEXT ASSY.` links | Complete script |
 
 ## Key design decision: the model reads text, not pictures
@@ -57,7 +57,7 @@ Windows setup, Tesseract installation and template tuning are covered in [drawin
 | :--- | :--- |
 | Extraction, cell isolation, BOM parsing, report structuring | `tests/test_drawing_audit.py` on the synthetic vector PDF |
 | Audit stage JSON handling and fallback | Same file, with a stub client in place of Ollama |
-| Zone grid detection and general-tolerance parsing | `tests/test_dimcheck.py` on the synthetic PDF |
+| Zone grid detection, general-tolerance parsing, dimension matching, full checklist fill | `tests/test_dimcheck.py` on the synthetic PDF and a hand-built checklist `.docx` |
 | Cross-drawing and cross-document rules | `tests/test_coherence.py` with hand-built records |
 
 ```bash
@@ -75,7 +75,7 @@ Writing these tests found one bug in the general-tolerance parser: `ANGLE ±1/2�
 - Title-block and BOM extraction is heuristic and tuned through `drawing-audit/config.py`; unusual templates may need new label aliases or region settings.
 - Gemma 4 E4B is a small on-device model and can miss subtle errors or raise false positives. CPU-only runs with thinking mode are slow.
 - Notes extraction is simple and can carry list numbering or neighbouring text into a note.
-- dimcheck cannot run end to end until `dimension_matcher.py` is added, and asymmetric stacked limits are a known open issue.
+- dimcheck's asymmetric/unilateral stacked-figure tolerances (two numbers above/below the dimension line, rather than an inline `±` value) are a known open issue: they currently fall through to the general tolerance table instead of being read as an explicit value.
 - The coherence checker reads PDF text only and skips scanned sheets.
 
 ## Repository layout

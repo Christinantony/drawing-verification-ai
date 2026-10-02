@@ -1,13 +1,13 @@
 # dimcheck — drawing tolerance → checklist filler
 
-> **Repository status:** `dimcheck/dimension_matcher.py` (the module that
-> locates each checklist dimension inside its zone and reads any explicit
-> tolerance next to it) is **not included in this repository yet**, so
-> `check_tolerances.py` will not run end to end until it is added. The zone
-> grid, general-tolerance parser, PDF token extraction and checklist I/O are
-> present and covered by tests in `../tests/test_dimcheck.py`. The validation
-> result described below comes from the original development run, not from
-> this repository's tests.
+> **Repository status:** all modules — `pdf_layout.py`, `zoning.py`,
+> `general_tolerance.py`, `dimension_matcher.py`, `checklist_io.py` and
+> `pipeline.py` — are present, and `check_tolerances.py` runs end to end.
+> Every stage is covered by tests in `../tests/test_dimcheck.py`, including
+> `dimension_matcher.py`'s zone-cell matching and the full PDF-to-filled-DOCX
+> pipeline, run against the synthetic drawing. The six-of-six result
+> described below comes from the original development run against a real
+> drawing/checklist pair, not from this repository's tests.
 
 Reads tolerances off an engineering drawing PDF (zoned per ISO-7200-style
 border grids, e.g. "F6", "C5") and fills them into the Tolerance column of a
@@ -49,8 +49,8 @@ rows need manual review.
    DECIMAL ±0.05 / ANGLE ±½°", used whenever a dimension has no tolerance
    of its own.
 4. **Match each checklist row's dimension in its zone**
-   (`dimension_matcher.py`, not yet in this repository) — handles a few
-   real wrinkles found even in the one sample drawing:
+   (`dimension_matcher.py`) — handles a few real wrinkles found even in the
+   one sample drawing:
    - **rotated text**: dimension text rotated 180° can come back with
      characters reversed ("8.5" → "5.8"); both orderings are checked.
    - **multi-token dimensions**: e.g. "1.0" + "THRU" on the same line.
@@ -121,7 +121,7 @@ dimcheck/
   pdf_layout.py          PDF text/OCR extraction -> tokens with bounding boxes
   zoning.py               Border-grid detection, zone <-> (x,y) mapping
   general_tolerance.py    Title-block general tolerance table parser
-  dimension_matcher.py    Locate a checklist dimension on the drawing, find its tolerance (not yet in this repo)
+  dimension_matcher.py    Locate a checklist dimension on the drawing, find its tolerance
   checklist_io.py         Read/write the checklist DOCX table
   pipeline.py             Orchestrates the above, produces a review report
 check_tolerances.py       CLI entry point
