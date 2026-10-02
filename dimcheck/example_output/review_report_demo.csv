@@ -1,0 +1,7 @@
+Zone,Dimension,Existing Tolerance,Resolved Tolerance,Source,Confidence,Notes
+F6,10,,±0.1,general_table,high,
+C5,3.5,,±0.1,general_table,high,
+E7,8.5,,±0.1,general_table,high,
+E5,4,,±0.1,general_table,medium,Dimension text found just outside zone E5's expected area -- verify the zone grid was read correctly for this drawing.
+C7,M3 THREADED HOLE3,,±0.1,assumed,high,"'M3 TAPPED' isn't a plain numeric dimension; no explicit tolerance was found next to it, so the ONE DECIMAL general tolerance (±0.1) was assumed. Confirm this is correct for this feature type (e.g. thread class)."
+F3,2,,±0.1,general_table,medium,Dimension text found just outside zone F3's expected area -- verify the zone grid was read correctly for this drawing.
