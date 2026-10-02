@@ -36,9 +36,31 @@ flowchart LR
 - **Rules decide, the model extracts.** In the coherence checker the model only pulls fields out of each file; every mismatch is raised by plain Python rules that can be read and tested.
 - **Traceable output.** dimcheck labels every tolerance as `explicit`, `general_table`, `assumed` or `unresolved` with a confidence level, and leaves a cell blank rather than guess.
 
+![What the extraction and structuring stages detected on the synthetic drawing: the title-block corner, ten bordered field boxes read one by one, the ruled BOM table and the notes](assets/extraction_overlay.png)
+
+*Stages 1 and 2 of drawing-audit run on `examples/synthetic_drawing.pdf`, with what they detected drawn over the sheet. The title-block fields come from the CAD rectangles, not from OCR; the BOM from the ruled table. This is the input the model receives (see [`examples/synthetic_structured_input.md`](examples/synthetic_structured_input.md)).*
+
 ## Example
 
 [`examples/synthetic_drawing.pdf`](examples/synthetic_drawing.pdf) is a small synthetic drawing with a deliberate typo ("MOUNTING BRAKCET"), a zero-quantity BOM line, and a note citing "REV A" of a spec on a drawing at revision B. [`examples/synthetic_structured_input.md`](examples/synthetic_structured_input.md) is the real output of the extraction and structuring stages for it: the exact text the model receives, with all five title-block fields read from their own boxes and the BOM read from the ruled table.
+
+### dimcheck on the same drawing
+
+![dimcheck: the zone grid detected from the border labels, the two checklist dimensions found in their zones, and the general tolerance note](assets/dimcheck_overlay.png)
+
+The CLI, run on a four-row checklist. Two rows are filled from the drawing; the thread callout and a dimension that is not on the sheet are left blank and reported, never guessed:
+
+![check_tolerances.py console output: two rows resolved from the general table at high confidence, two unresolved](assets/dimcheck_console.png)
+
+![The filled checklist .docx: tolerance cells filled for the two matched rows, blank for the other two](assets/dimcheck_filled_checklist.png)
+
+### coherence rules
+
+![The cross-drawing rules applied to a parent assembly and two sheets of one part: revision mismatch, a BOM line pointing at a drawing that is not in the set, and NEXT ASSY. links the parent BOM does not reciprocate](assets/coherence_rules.png)
+
+*`check_drawings()` on the hand-built records from `tests/test_coherence.py`. The model is only used to extract these records from real files; the findings are produced by the rules.*
+
+The figures above are produced by `python tests/make_figures.py` from real runs of the deterministic stages. No model output is shown: the Gemma stage needs a running Ollama server, which the test environment does not have.
 
 ## Quick start
 
@@ -67,6 +89,8 @@ python -m pytest
 
 The tests do not call a model, so they verify the deterministic stages, not Gemma's judgement. The dimcheck result in its README (six of six tolerances reproduced on a real drawing and checklist pair) comes from the original development run; that drawing is not published here.
 
+![pytest: 19 passed, covering coherence, dimcheck and drawing-audit](assets/tests_passing.png)
+
 Writing these tests found one bug in the general-tolerance parser: `ANGLE ±1/2°` was read as `±1`. It is fixed in this repository.
 
 ## Limitations
@@ -86,6 +110,7 @@ dimcheck/        drawing tolerances -> inspection checklist .docx
 coherence/       cross-file consistency checks for a drawing and document set
 examples/        synthetic drawing and its structured model input
 tests/           pytest suite for the deterministic stages
+assets/          README figures, written by tests/make_figures.py
 ```
 
 See [NOTICE.md](NOTICE.md) for rights and attribution.

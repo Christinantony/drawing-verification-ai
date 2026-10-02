@@ -25,6 +25,11 @@ The model only extracts fields; every pass/fail decision is made by the
 rules in `check_drawings()` and `find_generic_mismatches()`, which are covered
 by `../tests/test_coherence.py`.
 
+![check_drawings() on a parent assembly and two sheets of one part: four issues raised](../assets/coherence_rules.png)
+
+*The drawing set from `../tests/test_coherence.py`, run through the real rules
+(`python ../tests/make_figures.py`). No model is involved in this step.*
+
 ## Usage
 
 ```bash

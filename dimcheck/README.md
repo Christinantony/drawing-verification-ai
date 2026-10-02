@@ -18,6 +18,19 @@ Built and validated against a real Verdant Telemetry drawing + checklist
 pair — with the checklist's known-correct tolerances blanked out, the tool
 reproduces all six values exactly from the drawing alone.
 
+On the published synthetic drawing (`../examples/synthetic_drawing.pdf`),
+run end to end against a four-row checklist:
+
+![Zone grid, matched dimensions and general tolerances read from the synthetic drawing](../assets/dimcheck_overlay.png)
+
+![Console report of check_tolerances.py: C3/25.0 and B2/12 resolved from the general table, two rows left unresolved](../assets/dimcheck_console.png)
+
+![The filled checklist: two tolerance cells filled, two left blank for a human](../assets/dimcheck_filled_checklist.png)
+
+The thread callout in zone A1 and the dimension `999` are not on the sheet,
+so their cells stay empty and the CSV says why. `python ../tests/make_figures.py`
+regenerates the overlay.
+
 **Known open issue:** asymmetric/unilateral limits (e.g. an upper limit with
 a zero lower limit, or vice versa, typically drawn as two stacked figures
 rather than a single `±` value) are not parsed correctly yet — the matcher

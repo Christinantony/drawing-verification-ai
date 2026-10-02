@@ -57,6 +57,14 @@ never asks the model to *look* at the drawing. Instead:
 Nothing leaves your machine at any point, and no internet connection is
 required once setup is complete.
 
+What steps 1 to 3 detect on the synthetic drawing in `../examples/`, drawn
+over the sheet (`python ../tests/make_figures.py`):
+
+![Title-block region, ten bordered field boxes read cell by cell, the ruled BOM table and the notes block](../assets/extraction_overlay.png)
+
+The text handed to the model for this sheet is in
+[`../examples/synthetic_structured_input.md`](../examples/synthetic_structured_input.md).
+
 ---
 
 ## 1. Prerequisites (Windows 10)
