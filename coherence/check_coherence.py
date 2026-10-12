@@ -2,35 +2,25 @@
 """
 check_coherence.py
 
-Scans a folder of .docx / .xlsx / .pdf files (engineering drawings + docs),
-uses a local Gemma model (via Ollama) to extract structured data, then
-cross-checks for inconsistencies:
+Cross-checks a folder of drawings and documents for one product:
 
-  - Dates / part numbers / part names / revisions across docx & xlsx files
-  - For PDF drawings: title-block fields (drawing no, rev, date, title,
-    material, next assy.) and BOM tables, cross-checked so that:
-      * every BOM line's referenced part number exists as its own drawing,
-        with matching description
-      * NEXT ASSY. links are consistent in both directions (if A's
-        NEXT ASSY. = B, then B's BOM should list A)
-      * the same drawing number appearing on multiple sheets has a
-        consistent revision and date
+  Drawing PDFs (read with the shared sheetreader - text layer or OCR, no
+  model needed):
+    * the same drawing number on several sheets with a different rev / date / title
+    * BOM lines that reference a drawing: is it in the folder, does its title
+      match the BOM description, does its NEXT ASSY. point back?
+    * NEXT ASSY. links in both directions (a parent BOM must list the child;
+      "E-03 A&B" covers BOM refs "E-03A" and "E-03B")
+    * drawings printed on the same template form with different general
+      tolerances
+  Dimension checklists (.docx / .doc, matched to their drawing by file name):
+    * material and weight vs the drawing's title block
+    * every tolerance row vs the drawing (dimcheck in verify mode)
+  Other Word / Excel files (optional, uses Gemma through Ollama):
+    * the same part number with different names / revisions / dates
 
 Usage:
-    python check_coherence.py /path/to/folder [--model gemma3:4b] [--out report.md]
-
-Requirements:
-    pip install python-docx openpyxl requests pdfplumber
-
-Assumes Ollama is running locally and the model has been pulled:
-    ollama pull gemma3:4b
-
-PDF NOTES:
-  - This script extracts text directly (pdfplumber). It does NOT do OCR or
-    page rotation. If a PDF's text comes out empty or garbled (scanned
-    image, or a rotated drawing sheet), it will be flagged in the console
-    and skipped -- you'll need an OCR pass first (see the "needing OCR"
-    section in the report).
+    python check_coherence.py FOLDER [--out report.md] [--model gemma4:e4b] [--no-model]
 """
 
 import argparse
@@ -42,6 +32,10 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dimcheck"))
+from sheetreader.normalize import alnum, ids_from_filename, ocr_key, rev_key  # noqa: E402
+
 try:
     import docx
 except ImportError:
@@ -52,14 +46,9 @@ try:
 except ImportError:
     openpyxl = None
 
-try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
-
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-DEFAULT_MODEL = "gemma3:4b"
+DEFAULT_MODEL = "gemma4:e4b"
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -90,47 +79,6 @@ TEXT EXCERPT:
 ---
 
 JSON array:"""
-
-DRAWING_EXTRACTION_PROMPT = """You are extracting the title block and bill-of-materials (BOM) from a
-mechanical engineering drawing sheet. The raw text below was pulled from a PDF and may be jumbled
-in order (PDF text extraction does not preserve visual layout), but the field labels are present.
-
-Extract and return ONLY this JSON object (no other text, no markdown fences):
-{{
-  "drawing_no": "<value after 'DRAWING No.' / 'DRAWING NO.', or null>",
-  "revision": "<value after 'REV.' near the title block -- just the number/code, e.g. '01', or null>",
-  "date": "<date near the title block, or null>",
-  "title": "<value after 'TITLE', or null>",
-  "material": "<value after 'MATERIAL', or null>",
-  "next_assy": "<value after 'NEXT ASSY.' -- a drawing number, or null if blank/not present>",
-  "sheet": "<sheet number e.g. '1/5', or null>",
-  "bom": [
-    {{
-      "item_no": "<SL NO / item number in the parts list, or null>",
-      "description": "<part description/name, or null>",
-      "qty": "<quantity, or null>",
-      "ref_part_no": "<a referenced drawing/part number for this line item if one is given, e.g. 'VT-ML-JL 03 A1-01A', or null if it's just a generic fastener/material with no drawing>"
-    }}
-  ],
-  "revision_table": [
-    {{"rev_no": "<rev number>", "details": "<revision description text>"}}
-  ]
-}}
-
-Rules:
-- If there is no BOM table in this text, return "bom": [].
-- If there is no revision table content, return "revision_table": [].
-- Do not invent values. Use null where a field is not present.
-- A BOM line only gets a "ref_part_no" if an actual drawing-number-looking code is associated with it
-  (e.g. matches a pattern like "VT-ML-JL 03 A1-01A"). Generic hardware (bolts, o-rings, dowel pins with
-  just a material spec) should have ref_part_no: null.
-
-RAW TEXT:
----
-{chunk}
----
-
-JSON object:"""
 
 FUZZY_MATCH_PROMPT = """You are comparing two engineering records to decide if they refer to the
 SAME real-world part, despite possibly different wording/formatting.
@@ -210,19 +158,6 @@ def read_xlsx(path):
     return "\n".join(parts)
 
 
-def read_pdf_pages(path):
-    """Returns (list of (page_number, text)), (list of flagged page numbers needing OCR/rotation)."""
-    pages = []
-    flagged = []
-    with pdfplumber.open(path) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
-            if len(text.strip()) < 30:
-                flagged.append(i)
-            pages.append((i, text))
-    return pages, flagged
-
-
 # ---------------------------------------------------------------------------
 # Extraction per file
 # ---------------------------------------------------------------------------
@@ -242,62 +177,8 @@ def extract_generic_from_text(text, filename, model):
     return records
 
 
-def extract_drawing_from_text(text, filename, page_no, model):
-    try:
-        response = call_ollama(DRAWING_EXTRACTION_PROMPT.format(chunk=text), model)
-    except requests.RequestException as e:
-        print(f"    ! Ollama call failed: {e}", file=sys.stderr)
-        return None
-    obj = extract_json_blob(response, want_array=False)
-    if not obj:
-        return None
-    obj["_file"] = filename
-    obj["_page"] = page_no
-    return obj
+CHECKLIST_SUFFIXES = (".docx", ".doc")
 
-
-def process_file(path, model, ocr_todo):
-    ext = path.suffix.lower()
-    generic_records = []
-    drawings = []
-
-    if ext == ".docx":
-        if docx is None:
-            print(f"  ! python-docx not installed, skipping {path.name}", file=sys.stderr)
-            return generic_records, drawings
-        text = read_docx(path)
-        if text.strip():
-            generic_records = extract_generic_from_text(text, path.name, model)
-
-    elif ext == ".xlsx":
-        if openpyxl is None:
-            print(f"  ! openpyxl not installed, skipping {path.name}", file=sys.stderr)
-            return generic_records, drawings
-        text = read_xlsx(path)
-        if text.strip():
-            generic_records = extract_generic_from_text(text, path.name, model)
-
-    elif ext == ".pdf":
-        if pdfplumber is None:
-            print(f"  ! pdfplumber not installed, skipping {path.name}", file=sys.stderr)
-            return generic_records, drawings
-        pages, flagged = read_pdf_pages(path)
-        for pg in flagged:
-            ocr_todo.append(f"{path.name} (page {pg})")
-        for page_no, text in pages:
-            if len(text.strip()) < 30:
-                continue  # likely needs OCR/rotation, already flagged
-            print(f"  - {path.name} page {page_no}")
-            d = extract_drawing_from_text(text, path.name, page_no, model)
-            if d:
-                drawings.append(d)
-
-    return generic_records, drawings
-
-
-# ---------------------------------------------------------------------------
-# Normalization helpers
-# ---------------------------------------------------------------------------
 
 def norm(s):
     if s is None:
@@ -306,17 +187,292 @@ def norm(s):
     return s or None
 
 
-def norm_pn(s):
-    """Normalize a part/drawing number for matching: collapse spaces, uppercase."""
-    if s is None:
-        return None
-    s = str(s).strip().upper()
-    s = re.sub(r"\s+", " ", s)
-    return s or None
+def drawing_from_record(rec: dict) -> dict:
+    """sheetreader record -> the flat dict the rules below work on."""
+    tb = rec["title_block"]
+    return {
+        "_file": rec["file"], "_page": rec["page"], "_ocr": rec["text_source"] == "ocr",
+        "drawing_no": tb.get("drawing_number"), "revision": tb.get("revision"),
+        "date": tb.get("date"), "title": tb.get("title"), "material": tb.get("material"),
+        "weight": tb.get("weight"), "next_assy": tb.get("next_assy"), "sheet": tb.get("sheet"),
+        "form_id": rec.get("form_id"), "general_tolerance": rec.get("general_tolerance") or {},
+        "filename_drawing_no": rec.get("filename_drawing_number"),
+        "bom": [{"item_no": r.get("item"), "description": r.get("description"), "qty": r.get("qty"),
+                 "ref": r.get("ref") or r.get("part_number")} for r in rec.get("bom") or []],
+    }
+
+
+def canonicalize_ocr_ids(drawings):
+    """On OCR'd sheets, replace drawing numbers that match a known number
+    only up to look-alike characters ('AI-KD M12-E-02' -> 'AT-KD M12-E-02').
+    Known numbers come from file names and text-layer sheets, which are exact."""
+    known = {}
+    for d in drawings:
+        for dn in (d.get("filename_drawing_no"), None if d.get("_ocr") else d.get("drawing_no")):
+            if dn:
+                known.setdefault(ocr_key(dn), dn)
+    for d in drawings:
+        if not d.get("_ocr"):
+            continue
+        d["_ocr_corrections"] = []
+
+        def fix(v):
+            if not v or ocr_key(v) not in known or alnum(v) == alnum(known[ocr_key(v)]):
+                return v
+            d["_ocr_corrections"].append(f"{v} -> {known[ocr_key(v)]}")
+            return known[ocr_key(v)]
+
+        if d.get("drawing_no") and d.get("filename_drawing_no") and \
+                alnum(d["drawing_no"]).replace("AND", "") != alnum(d["filename_drawing_no"]):
+            d["drawing_no"] = fix(d["drawing_no"])
+        d["next_assy"] = fix(d.get("next_assy"))
+        for line in d.get("bom", []):
+            line["ref"] = fix(line.get("ref"))
+
+
+def _letter_prefix(s):
+    m = re.match(r"[A-Z]{2,}", alnum(s))
+    return m.group(0) if m else None
+
+
+def mark_drawing_refs(drawings):
+    """A BOM 'ref' is treated as a drawing reference when it starts like the
+    drawing numbers in this set (e.g. 'AT-KD M12-E-04' in an AT-KD set), so
+    hardware ('M2.5x4 CSK SCREWS'), materials ('ARALDITE 2011') and vendor
+    part numbers ('P/N: PN1234') are not expected to have drawings."""
+    prefixes = {_letter_prefix(d.get("drawing_no") or d.get("filename_drawing_no")) for d in drawings}
+    prefixes.discard(None)
+    for d in drawings:
+        for line in d.get("bom", []):
+            if "ref_part_no" in line:
+                continue
+            ref = line.get("ref")
+            line["ref_part_no"] = ref if ref and _letter_prefix(ref) in prefixes else None
+
+
+def id_keys(dn, ocr=False):
+    """Keys a drawing number answers to: its letters+digits, plus each part
+    of an 'A&B' / 'A/B' combined drawing ('AT-KD M12-E-03 A&B' answers to
+    E-03A and E-03B). OCR'd numbers also answer to their look-alike key."""
+    if not dn:
+        return set()
+    keys = {alnum(dn)}
+    m = re.match(r"^(.*?\d)[\s_-]*([A-Z])\s*[&/,]\s*([A-Z])\s*$", dn.strip(), re.I)
+    if m:
+        base = alnum(m.group(1))
+        keys |= {base + m.group(2).upper(), base + m.group(3).upper()}
+    if ocr:
+        keys |= {ocr_key(k) for k in list(keys)}
+    return keys
+
+
+class DrawingIndex:
+    def __init__(self, drawings):
+        self.sheets = drawings
+        self.by_key = defaultdict(list)
+        for d in drawings:
+            dn = d.get("drawing_no") or d.get("filename_drawing_no")
+            for k in id_keys(dn, d.get("_ocr")) | id_keys(d.get("filename_drawing_no")):
+                self.by_key[k].append(d)
+
+    def find(self, ref, ocr=False):
+        found = []
+        for k in id_keys(ref, True) if ocr else id_keys(ref):
+            for d in self.by_key.get(k, []):
+                if d not in found:
+                    found.append(d)
+        return found
+
+    def find_any(self, ref):
+        """Exact match first; failing that, allow OCR look-alike characters
+        (only OCR'd sheets are indexed under look-alike keys)."""
+        return self.find(ref) or self.find(ref, ocr=True)
+
+
+def _issue(kind, severity, dwg, detail, sheets):
+    return {"type": kind, "severity": severity, "drawing_no": dwg, "detail": detail, "sheets": sheets}
+
+
+def _titles_agree(a, b):
+    na, nb = alnum(a), alnum(b)
+    return bool(na and nb) and (na == nb or na in nb or nb in na)
+
+
+def check_drawings(drawings):
+    """Cross-drawing rules. Severity: high = definite contradiction, medium =
+    probable error, low = can't be checked from this folder."""
+    canonicalize_ocr_ids(drawings)
+    mark_drawing_refs(drawings)
+    issues = []
+    idx = DrawingIndex(drawings)
+
+    by_no = defaultdict(list)
+    for d in drawings:
+        if d.get("drawing_no"):
+            by_no[ocr_key(d["drawing_no"]) if d.get("_ocr") else alnum(d["drawing_no"])].append(d)
+    # Same drawing on several sheets / files.
+    for key, sheets in by_no.items():
+        if len(sheets) < 2:
+            continue
+        for field, kind in (("revision", "Drawing revision mismatch"), ("date", "Drawing date mismatch"),
+                            ("title", "Drawing title mismatch")):
+            vals = {alnum(s.get(field)) for s in sheets if s.get(field)}
+            if len(vals) > 1:
+                issues.append(_issue(kind, "high", sheets[0]["drawing_no"],
+                                     {s.get(field) for s in sheets if s.get(field)}, sheets))
+
+    # BOM -> child drawings.
+    for d in drawings:
+        parent = d.get("drawing_no")
+        for line in d.get("bom", []):
+            ref = line.get("ref_part_no")
+            if not ref:
+                continue
+            children = idx.find_any(ref)
+            if not children:
+                issues.append(_issue("BOM references missing drawing", "low", parent,
+                                     f"BOM item {line.get('item_no') or '?'} '{line.get('description')}' "
+                                     f"references {ref}, which is not in this folder - add it to check it.",
+                                     [d]))
+                continue
+            for c in children:
+                if line.get("description") and c.get("title") and not _titles_agree(line["description"], c["title"]):
+                    issues.append(_issue("BOM description vs drawing title mismatch", "medium", parent,
+                                         f"BOM calls {ref} '{line['description']}' but that drawing's title "
+                                         f"is '{c['title']}'.", [d, c]))
+                if c.get("next_assy") and parent and not (
+                        id_keys(c["next_assy"], c.get("_ocr") or d.get("_ocr")) &
+                        id_keys(parent, c.get("_ocr") or d.get("_ocr"))):
+                    issues.append(_issue("Child's NEXT ASSY. is a different drawing", "medium", parent,
+                                         f"{parent}'s BOM lists {c['drawing_no']}, but {c['drawing_no']}'s "
+                                         f"NEXT ASSY. is {c['next_assy']}.", [d, c]))
+
+    # NEXT ASSY. -> parent BOM.
+    for d in drawings:
+        this_no, nxt = d.get("drawing_no"), d.get("next_assy")
+        if not (this_no and nxt):
+            continue
+        parents = idx.find_any(nxt)
+        if not parents:
+            issues.append(_issue("NEXT ASSY. points to unknown drawing", "low", this_no,
+                                 f"NEXT ASSY. = {nxt}, which is not in this folder - add it to check the link.",
+                                 [d]))
+            continue
+        mine = id_keys(this_no, True)
+        listed = any(mine & id_keys(line.get("ref_part_no") or line.get("ref"), True)
+                     for p in parents for line in p.get("bom", []))
+        if not listed:
+            issues.append(_issue("NEXT ASSY. not reciprocated in parent BOM", "high", this_no,
+                                 f"{this_no} says NEXT ASSY. = {nxt}, but {nxt}'s BOM does not list {this_no}.",
+                                 [d] + parents))
+
+    # Same template form, different general tolerances.
+    by_form = defaultdict(list)
+    for d in drawings:
+        if d.get("form_id") and d.get("general_tolerance"):
+            by_form[re.sub(r"\s*REV.*$", "", d["form_id"])].append(d)
+    for form, sheets in by_form.items():
+        sigs = defaultdict(list)
+        for s in sheets:
+            gt = s["general_tolerance"]
+            sig = tuple((k, gt.get(k)) for k in ("without_decimal", "one_decimal", "two_decimal") if gt.get(k))
+            if sig:
+                sigs[sig].append(s)
+        if len(sigs) > 1:
+            parts = [", ".join(f"{k.replace('_', ' ')} {v}" for k, v in sig) + " on " +
+                     ", ".join(x["drawing_no"] or x["_file"] for x in ss) for sig, ss in sigs.items()]
+            issues.append(_issue("Same template form, different general tolerances", "medium", form,
+                                 f"Drawings on form {form} disagree: " + " | ".join(parts) +
+                                 ". Confirm which is intended for each part.", sheets))
+    return issues
 
 
 # ---------------------------------------------------------------------------
-# Generic (docx/xlsx) cross-checks
+# Dimension checklists
+# ---------------------------------------------------------------------------
+
+def read_checklist(path):
+    """Header facts from a dimension checklist (material, weight), or None if
+    the document isn't one (no zone/dimension table)."""
+    from dimcheck.checklist_io import ensure_docx, load_checklist_rows
+    try:
+        document, table, rows = load_checklist_rows(str(path))
+    except Exception:
+        return None
+    if not rows:
+        return None
+    text = "\n".join(c.text for r in table.rows for c in r.cells)
+    mat = re.search(r"Material\s*:\s*(.+)", text, re.I)
+    wt = re.search(r"Weight[^:\n]*:\s*(.+)", text, re.I)
+    return {"_file": Path(path).name, "path": str(path),
+            "material": mat.group(1).strip() if mat else None,
+            "weight": wt.group(1).strip() if wt else None, "rows": len(rows)}
+
+
+def _common_suffix(a, b):
+    n = 0
+    while n < min(len(a), len(b)) and a[-1 - n] == b[-1 - n]:
+        n += 1
+    return n
+
+
+def match_checklist(chk, drawing_files):
+    """The drawing a checklist belongs to: the longest shared file-name
+    ending ('AT-F-DCL-PX_2B_40-03_REV._00' <-> 'AT-PX_2B_40-03_REV._00')."""
+    stem = alnum(Path(chk["_file"]).stem)
+    best, best_n = None, 0
+    for f in drawing_files:
+        n = _common_suffix(stem, alnum(Path(f).stem))
+        if n > best_n:
+            best, best_n = f, n
+    return best if best_n >= 8 else None
+
+
+def _weight_numbers(s):
+    return [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s or "")][:2]
+
+
+def check_checklists(checklists, drawings, pdf_paths, run_dimcheck=True):
+    issues = []
+    for chk in checklists:
+        pdf = match_checklist(chk, [p.name for p in pdf_paths])
+        if not pdf:
+            issues.append(_issue("Checklist without matching drawing", "low", chk["_file"],
+                                 "No drawing in this folder matches this checklist's file name.", []))
+            continue
+        d = next((x for x in drawings if x["_file"] == pdf), None)
+        if d is None:
+            continue
+        if chk.get("material") and d.get("material") and alnum(chk["material"]) != alnum(d["material"]):
+            issues.append(_issue("Checklist material differs from drawing", "high", d["drawing_no"],
+                                 f"Checklist: '{chk['material']}'; drawing: '{d['material']}'.", [d]))
+        if chk.get("weight") and d.get("weight") and _weight_numbers(chk["weight"]) != _weight_numbers(d["weight"]):
+            issues.append(_issue("Checklist weight differs from drawing", "high", d["drawing_no"],
+                                 f"Checklist: '{chk['weight']}'; drawing: '{d['weight']}'.", [d]))
+        if run_dimcheck:
+            from dimcheck.pipeline import process
+            path = next(p for p in pdf_paths if p.name == pdf)
+            try:
+                reports = process(str(path), chk["path"], None)
+            except Exception as e:
+                issues.append(_issue("Checklist could not be verified", "low", d["drawing_no"], str(e), [d]))
+                continue
+            chk["dimcheck"] = reports
+            for r in reports:
+                if r.verdict.startswith("MISMATCH"):
+                    issues.append(_issue("Checklist tolerance differs from drawing", "high", d["drawing_no"],
+                                         f"{chk['_file']}: zone {r.zone} dimension {r.dimension} - checklist "
+                                         f"{r.existing_tolerance}, drawing {r.resolved_tolerance} ({r.source}).",
+                                         [d]))
+                elif r.verdict in ("not set", "kept") and r.source == "unresolved":
+                    issues.append(_issue("Checklist row not verifiable", "low", d["drawing_no"],
+                                         f"{chk['_file']}: zone {r.zone} dimension {r.dimension} - "
+                                         + "; ".join(r.notes), [d]))
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Generic (Word / Excel, model-extracted) cross-checks
 # ---------------------------------------------------------------------------
 
 def group_by_part_number(records):
@@ -343,98 +499,6 @@ def find_generic_mismatches(groups):
     return issues
 
 
-# ---------------------------------------------------------------------------
-# Drawing (PDF) cross-checks
-# ---------------------------------------------------------------------------
-
-def check_drawings(drawings):
-    issues = []
-
-    by_dwg_no = defaultdict(list)
-    for d in drawings:
-        key = norm_pn(d.get("drawing_no"))
-        if key:
-            by_dwg_no[key].append(d)
-
-    # 1. Same drawing number, inconsistent rev/date/title across sheets
-    for dwg_no, sheets in by_dwg_no.items():
-        revs = {norm(s.get("revision")) for s in sheets if s.get("revision")}
-        dates = {norm(s.get("date")) for s in sheets if s.get("date")}
-        titles = {norm(s.get("title")) for s in sheets if s.get("title")}
-        if len(revs) > 1:
-            issues.append({"type": "Drawing revision mismatch", "drawing_no": dwg_no,
-                            "detail": revs, "sheets": sheets})
-        if len(dates) > 1:
-            issues.append({"type": "Drawing date mismatch", "drawing_no": dwg_no,
-                            "detail": dates, "sheets": sheets})
-        if len(titles) > 1:
-            issues.append({"type": "Drawing title mismatch", "drawing_no": dwg_no,
-                            "detail": titles, "sheets": sheets})
-
-    # 2. BOM references -> do they exist as real drawings? Does description match?
-    for d in drawings:
-        parent_no = norm_pn(d.get("drawing_no"))
-        for line in d.get("bom", []):
-            ref = norm_pn(line.get("ref_part_no"))
-            if not ref:
-                continue
-            if ref not in by_dwg_no:
-                issues.append({
-                    "type": "BOM references missing drawing",
-                    "drawing_no": parent_no,
-                    "detail": f"BOM item '{line.get('description')}' references {ref}, "
-                              f"but no drawing with that number was found in the file set.",
-                    "sheets": [d],
-                })
-            else:
-                child_titles = {norm(s.get("title")) for s in by_dwg_no[ref] if s.get("title")}
-                bom_desc = norm(line.get("description"))
-                if bom_desc and child_titles and bom_desc not in child_titles:
-                    issues.append({
-                        "type": "BOM description vs drawing title mismatch",
-                        "drawing_no": parent_no,
-                        "detail": f"BOM calls {ref} '{line.get('description')}', "
-                                  f"but its drawing title is {child_titles}.",
-                        "sheets": [d] + by_dwg_no[ref],
-                    })
-
-    # 3. NEXT ASSY. bidirectional check
-    for d in drawings:
-        this_no = norm_pn(d.get("drawing_no"))
-        next_assy = norm_pn(d.get("next_assy"))
-        if not next_assy:
-            continue
-        if next_assy not in by_dwg_no:
-            issues.append({
-                "type": "NEXT ASSY. points to unknown drawing",
-                "drawing_no": this_no,
-                "detail": f"NEXT ASSY. = {next_assy}, but no such drawing found in file set.",
-                "sheets": [d],
-            })
-            continue
-        parents = by_dwg_no[next_assy]
-        found_in_bom = False
-        for parent in parents:
-            refs = {norm_pn(line.get("ref_part_no")) for line in parent.get("bom", [])}
-            if this_no in refs:
-                found_in_bom = True
-                break
-        if not found_in_bom:
-            issues.append({
-                "type": "NEXT ASSY. not reciprocated in parent BOM",
-                "drawing_no": this_no,
-                "detail": f"{this_no} says NEXT ASSY. = {next_assy}, but {next_assy}'s BOM "
-                          f"does not list {this_no}.",
-                "sheets": [d] + parents,
-            })
-
-    return issues
-
-
-# ---------------------------------------------------------------------------
-# Fuzzy cross-check (generic records only)
-# ---------------------------------------------------------------------------
-
 def fuzzy_cross_check(all_records, model):
     unmatched = [r for r in all_records if r.get("part_name") and not norm(r.get("part_number"))]
     suspects = []
@@ -460,109 +524,114 @@ def fuzzy_cross_check(all_records, model):
 
 
 # ---------------------------------------------------------------------------
-# Report writer
+# Report
 # ---------------------------------------------------------------------------
 
-def write_report(generic_issues, drawing_issues, suspects, ocr_todo, out_path, files_scanned):
-    lines = ["# Document Coherence Report\n"]
-    lines.append(f"Files scanned: {len(files_scanned)}\n")
+SEV_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
+
+
+def write_report(drawing_issues, generic_issues, suspects, drawings, checklists, out_path, files_scanned):
+    L = ["# Document Coherence Report", "", f"Files scanned: {len(files_scanned)}", ""]
     for f in files_scanned:
-        lines.append(f"- {f}")
-    lines.append("")
-
-    if ocr_todo:
-        lines.append("## Pages needing OCR / rotation (skipped)\n")
-        for item in ocr_todo:
-            lines.append(f"- {item}")
-        lines.append("")
-
-    total_issues = len(generic_issues) + len(drawing_issues)
-    if total_issues == 0 and not suspects:
-        lines.append("No inconsistencies found across files.\n")
-
-    if drawing_issues:
-        lines.append(f"## Drawing (PDF) issues: {len(drawing_issues)}\n")
-        for issue in drawing_issues:
-            lines.append(f"### {issue['type']} — `{issue['drawing_no']}`")
-            lines.append(f"{issue['detail']}\n")
-            lines.append("| File | Page | Drawing No. | Rev | Date | Title | Next Assy. |")
-            lines.append("|---|---|---|---|---|---|---|")
-            for s in issue["sheets"]:
-                lines.append(
-                    f"| {s.get('_file','')} | {s.get('_page','')} | {s.get('drawing_no','')} "
-                    f"| {s.get('revision','')} | {s.get('date','')} | {s.get('title','')} "
-                    f"| {s.get('next_assy','')} |"
-                )
-            lines.append("")
-
+        L.append(f"- {f}")
+    L += ["", "## Drawings read", "",
+          "| File | Drawing No. | Rev | Date | Title | Next Assy. | BOM lines | Read via |",
+          "|---|---|---|---|---|---|---|---|"]
+    for d in drawings:
+        L.append(f"| {d['_file']} | {d.get('drawing_no') or ''} | {d.get('revision') or ''} | {d.get('date') or ''} "
+                 f"| {d.get('title') or ''} | {d.get('next_assy') or ''} | {len(d.get('bom', []))} "
+                 f"| {'OCR' if d.get('_ocr') else 'text layer'} |")
+    if checklists:
+        L += ["", "## Checklists", ""]
+        for c in checklists:
+            reps = c.get("dimcheck") or []
+            n_ok = sum(1 for r in reps if r.verdict == "match")
+            L.append(f"- {c['_file']}: {c['rows']} dimension rows" +
+                     (f", {n_ok} match the drawing" if reps else ""))
+    L.append("")
+    issues = sorted(drawing_issues, key=lambda i: SEV_ORDER.get(i.get("severity", "medium"), 9))
+    if not issues and not generic_issues and not suspects:
+        L.append("No inconsistencies found across files.")
+    if issues:
+        L += [f"## Cross-file issues: {len(issues)}", ""]
+        for i in issues:
+            L.append(f"- **[{i.get('severity', 'medium').upper()}] {i['type']}** - `{i['drawing_no']}`: {i['detail']}")
+        L.append("")
     if generic_issues:
-        lines.append(f"## Word/Excel mismatches: {len(generic_issues)}\n")
+        L += [f"## Word/Excel mismatches: {len(generic_issues)}", ""]
         for issue in generic_issues:
-            lines.append(f"### {issue['type']} — part number `{issue['part_number']}`")
-            lines.append(f"Conflicting values: {', '.join(str(d) for d in issue['detail'])}\n")
-            lines.append("| File | Date | Part Number | Part Name | Revision | Context |")
-            lines.append("|---|---|---|---|---|---|")
-            for r in issue["records"]:
-                lines.append(
-                    f"| {r.get('_file','')} | {r.get('date','')} | {r.get('part_number','')} "
-                    f"| {r.get('part_name','')} | {r.get('revision','')} | {r.get('context','')} |"
-                )
-            lines.append("")
-
+            L.append(f"### {issue['type']} - part number `{issue['part_number']}`")
+            L.append(f"Conflicting values: {', '.join(str(d) for d in issue['detail'])}")
+            L.append("")
     if suspects:
-        lines.append(f"## Possible same-part naming inconsistencies (fuzzy match): {len(suspects)}\n")
+        L += [f"## Possible same-part naming inconsistencies: {len(suspects)}", ""]
         for a, b in suspects:
-            lines.append(f"- `{a.get('part_name')}` (in {a['_file']}) may be the same part as "
-                         f"`{b.get('part_name')}` (in {b['_file']}) — verify manually.")
-        lines.append("")
-
-    Path(out_path).write_text("\n".join(lines), encoding="utf-8")
+            L.append(f"- `{a.get('part_name')}` ({a['_file']}) may be `{b.get('part_name')}` ({b['_file']}).")
+    Path(out_path).write_text("\n".join(L), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("folder", help="Folder containing .docx/.xlsx/.pdf files")
+def main(argv=None):
+    from sheetreader.record import read_drawing
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("folder", help="Folder with drawing PDFs, checklists and other .docx/.xlsx files")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--out", default="coherence_report.md")
+    ap.add_argument("--no-model", action="store_true",
+                    help="Skip model extraction of generic Word/Excel files (drawings and checklists don't need it).")
     ap.add_argument("--skip-fuzzy", action="store_true")
-    args = ap.parse_args()
+    ap.add_argument("--no-dimcheck", action="store_true", help="Don't verify checklist tolerance rows.")
+    args = ap.parse_args(argv)
 
     folder = Path(args.folder)
-    files = sorted([p for p in folder.iterdir() if p.suffix.lower() in (".docx", ".xlsx", ".pdf")])
+    files = sorted(p for p in folder.iterdir()
+                   if p.suffix.lower() in (".docx", ".doc", ".xlsx", ".pdf") and not p.name.startswith("~$"))
     if not files:
-        print("No .docx/.xlsx/.pdf files found.", file=sys.stderr)
+        print("No .pdf/.docx/.doc/.xlsx files found.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Found {len(files)} files. Extracting with model={args.model}...")
-    all_generic_records = []
-    all_drawings = []
-    ocr_todo = []
-
+    drawings, checklists, generic = [], [], []
+    pdfs = [p for p in files if p.suffix.lower() == ".pdf"]
     for f in files:
-        print(f"Processing {f.name}...")
-        generic, drawings = process_file(f, args.model, ocr_todo)
-        all_generic_records.extend(generic)
-        all_drawings.extend(drawings)
+        print(f"Reading {f.name} ...")
+        if f.suffix.lower() == ".pdf":
+            try:
+                for rec in read_drawing(f):
+                    drawings.append(drawing_from_record(rec.to_dict()))
+            except Exception as e:
+                print(f"  ! could not read {f.name}: {e}", file=sys.stderr)
+            continue
+        if f.suffix.lower() in CHECKLIST_SUFFIXES:
+            chk = read_checklist(f)
+            if chk:
+                checklists.append(chk)
+                continue
+            if f.suffix.lower() == ".doc":
+                continue
+        if args.no_model:
+            continue
+        text = read_docx(f) if f.suffix.lower() == ".docx" else read_xlsx(f)
+        if text.strip():
+            generic.extend(extract_generic_from_text(text, f.name, args.model))
 
-    print(f"\nExtracted {len(all_generic_records)} generic records, {len(all_drawings)} drawing sheets.")
-
-    groups = group_by_part_number(all_generic_records)
-    generic_issues = find_generic_mismatches(groups)
-    drawing_issues = check_drawings(all_drawings)
-
+    drawing_issues = check_drawings(drawings)
+    drawing_issues += check_checklists(checklists, drawings, pdfs, run_dimcheck=not args.no_dimcheck)
+    generic_issues = find_generic_mismatches(group_by_part_number(generic))
     suspects = []
-    if not args.skip_fuzzy and all_generic_records:
-        print("Running fuzzy cross-check...")
-        suspects = fuzzy_cross_check(all_generic_records, args.model)
+    if generic and not args.skip_fuzzy and not args.no_model:
+        suspects = fuzzy_cross_check(generic, args.model)
 
-    write_report(generic_issues, drawing_issues, suspects, ocr_todo, args.out, [f.name for f in files])
-    print(f"\nDone. Report written to {args.out}")
-    print(f"  {len(drawing_issues)} drawing issues, {len(generic_issues)} generic mismatches, "
-          f"{len(suspects)} fuzzy suspects, {len(ocr_todo)} pages need OCR/rotation.")
+    write_report(drawing_issues, generic_issues, suspects, drawings, checklists, args.out, [f.name for f in files])
+    n = defaultdict(int)
+    for i in drawing_issues:
+        n[i.get("severity", "medium")] += 1
+    print(f"\nReport written to {args.out}: {n['high']} high, {n['medium']} medium, {n['low']} low "
+          f"cross-file issue(s); {len(generic_issues)} Word/Excel mismatch(es).")
+    return drawing_issues
 
 
 if __name__ == "__main__":

@@ -85,12 +85,16 @@ def detect_grid(tokens: List[Token], page_width: float, page_height: float) -> Z
     number_re = re.compile(r"^[1-9][0-9]?$")
     letter_re = re.compile(r"^[A-Za-z]$")
 
+    # Zone labels are always upright; vertical words in the margin (the
+    # confidentiality text running up the border contains "A", "T", ...)
+    # must not be mistaken for row letters.
+    upright = [t for t in tokens if getattr(t, "horizontal", True)]
     number_candidates = [
-        t for t in tokens
+        t for t in upright
         if number_re.match(t.text) and (t.bottom <= top_margin or t.top >= bottom_margin)
     ]
     letter_candidates = [
-        t for t in tokens
+        t for t in upright
         if letter_re.match(t.text) and (t.x1 <= left_margin or t.x0 >= right_margin)
     ]
 

@@ -1,152 +1,204 @@
 """
-main.py
-CLI entry point.
-
-Usage (from PowerShell / cmd, inside the project's venv):
+drawing-audit: check one drawing, or every drawing in a folder.
 
     python main.py path\\to\\drawing.pdf
-    python main.py path\\to\\scan.png -o reports\\scan_report.md --json
-    python main.py drawing.pdf --model gemma4:e4b --no-thinking
+    python main.py path\\to\\folder --json
+    python main.py drawing.pdf --no-model      # rules + dictionary only, no Ollama
+    python main.py drawing.pdf --deep          # also the slow full reasoning audit
 
-Everything runs locally against Ollama on http://localhost:11434 - no
-network access is used or required once the model has been pulled.
+What happens per sheet:
+  1. sheetreader reads it: text layer if there is one (SolidWorks), OCR after
+     finding which way up it is if not (AutoCAD via Print to PDF, scans).
+  2. Deterministic rules (rules.py): fields, revision table, file name,
+     sheet size, scale, BOM numbering/quantities, sign-offs. Instant.
+  3. Language (language.py): known misspellings, dictionary, then one short
+     Gemma call with thinking off.
+  4. --deep only: the full structured sheet goes to Gemma with thinking on.
+
+Everything runs locally; nothing is sent anywhere.
 """
-
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
-import config
-import extraction
-import structuring
-import audit
-from ollama_client import get_client, check_model_available
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
+
+import config  # noqa: E402
+import language  # noqa: E402
+import rules  # noqa: E402
+from sheetreader.loader import IMAGE_SUFFIXES  # noqa: E402
+from sheetreader.record import read_drawing  # noqa: E402
+from sheetreader.titleblock import DEFAULT_LABELS  # noqa: E402
+
+SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 
 
-def build_report_markdown(source_path: Path, structured: dict, audit_result: dict) -> str:
-    lines = [
-        "# Drawing Verification Report",
-        "",
-        f"**Source:** `{source_path}`",
-        f"**Pages:** {structured.get('page_count')}  "
-        f"**Extraction:** {', '.join(structured.get('extraction_sources', []))}  "
-        f"**Title block:** {structured.get('title_block_cell_count', 0)} bordered field box(es), "
-        f"{structured.get('title_block_method', 'regex_only')}",
-        f"**Overall status:** {audit_result.get('overall_status', 'UNKNOWN')}",
-        "",
-        "## Title Block",
-        "",
-        "| Field | Value |",
-        "|---|---|",
-    ]
-    for k, v in structured.get("title_block", {}).items():
+def _labels():
+    labels = {k: list(v) for k, v in DEFAULT_LABELS.items()}
+    for k, v in config.EXTRA_TITLE_BLOCK_LABELS.items():
+        labels.setdefault(k, [])
+        labels[k] = list(v) + labels[k]
+    return labels
+
+
+def record_to_markdown(rec: dict) -> str:
+    """The structured sheet as Markdown (also what --deep sends to the model)."""
+    tb = rec["title_block"]
+    lines = ["| Field | Value |", "|---|---|"]
+    for k, v in tb.items():
         lines.append(f"| {k} | {v if v else '_(not found)_'} |")
-
-    lines += ["", "## Bill of Materials", ""]
-    bom = structured.get("bom", [])
+    gt = rec.get("general_tolerance") or {}
+    if gt:
+        lines += ["", "**General tolerances:** " + ", ".join(
+            f"{k.replace('_', ' ')} {v}" for k, v in gt.items() if v)]
+    lines += ["", "**Bill of materials**", ""]
+    bom = rec.get("bom") or []
     if bom:
-        headers = sorted({k for row in bom for k in row.keys()})
-        lines.append("| " + " | ".join(headers) + " |")
-        lines.append("|" + "---|" * len(headers))
-        for row in bom:
-            lines.append("| " + " | ".join(row.get(h, "") for h in headers) + " |")
+        cols = ["item", "description", "qty", "ref"]
+        cols += sorted({k for r in bom for k in r} - set(cols))
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("|" + "---|" * len(cols))
+        for r in bom:
+            lines.append("| " + " | ".join((r.get(c) or "").replace("|", "/") for c in cols) + " |")
     else:
-        lines.append("_No BOM rows detected._")
-
-    lines += ["", "## Findings", ""]
-    findings = audit_result.get("findings", [])
-    if not findings:
-        lines.append("No issues found.")
-    for f in findings:
-        lines.append(f"### [{str(f.get('severity', '?')).upper()}] {f.get('id', '')} - {f.get('category', '')}")
-        lines.append(f"- **Location:** {f.get('location', '')}")
-        lines.append(f"- **Issue:** {f.get('description', '')}")
-        if f.get("suggested_fix"):
-            lines.append(f"- **Suggested fix:** {f.get('suggested_fix')}")
-        lines.append("")
-
-    lines += ["## Summary", "", audit_result.get("summary", ""), ""]
-
-    if audit_result.get("_thinking_trace"):
-        lines += [
-            "<details><summary>Model reasoning trace (Gemma 4 &lt;|think|&gt;)</summary>",
-            "",
-            "```",
-            audit_result["_thinking_trace"][:8000],
-            "```",
-            "</details>",
-        ]
+        lines.append("_No BOM on this sheet._")
+    rt = rec.get("revision_table") or []
+    lines += ["", "**Revision table:** " + ("; ".join(
+        f"REV {r.get('rev', '?')}: {r.get('details', '')}" for r in rt) if rt else "_empty_")]
+    if rec.get("notes"):
+        lines += ["", "**Notes**", ""] + [f"- {n}" for n in rec["notes"]]
     return "\n".join(lines)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Offline 2D engineering-drawing verification checker "
-                     "(Gemma 4 E4B via Ollama)."
-    )
-    parser.add_argument("input", help="Path to a drawing PDF or image (PNG/JPG/TIFF/BMP).")
-    parser.add_argument("-o", "--output",
-                         help="Report file to write (.md). Default: reports/<name>_report.md")
-    parser.add_argument("--model", default=config.MODEL_NAME,
-                         help=f"Ollama model tag (default: {config.MODEL_NAME})")
-    parser.add_argument("--no-thinking", action="store_true",
-                         help="Disable Gemma 4's <|think|> reasoning mode (faster, shallower).")
-    parser.add_argument("--json", action="store_true",
-                         help="Also write the full structured+audit data as JSON next to the report.")
-    args = parser.parse_args()
+def build_report(results: list) -> str:
+    out = ["# Drawing Verification Report", ""]
+    if len(results) > 1:
+        out += ["| Drawing | Status | High | Medium | Low | Read via | Time |", "|---|---|---|---|---|---|---|"]
+        for r in results:
+            c = {s: sum(1 for f in r["findings"] if f["severity"] == s) for s in ("high", "medium", "low")}
+            out.append(f"| {r['record']['file']} p{r['record']['page']} | **{r['status']}** | {c['high']} | "
+                       f"{c['medium']} | {c['low']} | {r['record']['text_source']} | {r['seconds']:.0f}s |")
+        out.append("")
+    for r in results:
+        rec = r["record"]
+        how = ("PDF text layer" if rec["text_source"] == "embedded"
+               else f"OCR (no text layer; rotated {rec['rotation_deg']} deg to read upright)")
+        out += [f"## {rec['file']} - page {rec['page']} of {rec['page_count']}", "",
+                f"**Status: {r['status']}**  ",
+                f"Read via {how}; sheet {rec.get('paper_size') or '?'} {rec['orientation']}; "
+                f"producer: {rec.get('producer') or 'unknown'}; {r['seconds']:.1f}s", ""]
+        findings = sorted(r["findings"], key=lambda f: SEVERITY_ORDER.get(f["severity"], 9))
+        out += ["### Findings", ""]
+        if not [f for f in findings if f["severity"] != "info"]:
+            out.append("No issues found.")
+        for f in findings:
+            fix = f" **Fix:** {f['suggested_fix']}" if f.get("suggested_fix") else ""
+            out.append(f"- **[{f['severity'].upper()}]** `{f['location']}` {f['description']}{fix} "
+                       f"_({f.get('source', 'rule')})_")
+        out += ["", "### What was read", "", record_to_markdown(rec), ""]
+        trace = r.get("language_trace") or {}
+        if trace.get("model_error"):
+            out += [f"_Language model not used: {trace['model_error']}_", ""]
+        if r.get("deep"):
+            d = r["deep"]
+            out += ["### Deep audit (Gemma, thinking on)", "", d.get("summary", ""), ""]
+            if d.get("_thinking_trace"):
+                out += ["<details><summary>Reasoning trace</summary>", "", "```",
+                        d["_thinking_trace"][:8000], "```", "</details>", ""]
+    return "\n".join(out)
+
+
+def collect_inputs(path: Path):
+    if path.is_dir():
+        return sorted(p for p in path.iterdir()
+                      if p.suffix.lower() == ".pdf" or p.suffix.lower() in IMAGE_SUFFIXES)
+    return [path]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Offline engineering-drawing checker (Gemma 4 E4B via Ollama).")
+    ap.add_argument("input", help="A drawing PDF/image, or a folder of them.")
+    ap.add_argument("-o", "--output", help="Report file (.md). Default: reports/<name>_report.md")
+    ap.add_argument("--json", action="store_true", help="Also write the full records + findings as JSON.")
+    ap.add_argument("--model", default=config.MODEL_NAME)
+    ap.add_argument("--no-model", action="store_true",
+                    help="Skip Gemma entirely (rules, known misspellings and dictionary only).")
+    ap.add_argument("--deep", action="store_true",
+                    help="Also run the full reasoning audit with thinking on (slow on CPU).")
+    ap.add_argument("--force-ocr", action="store_true", help="OCR even if the PDF has a text layer.")
+    args = ap.parse_args(argv)
+
+    if config.TESSERACT_CMD:
+        os.environ["TESSERACT_CMD"] = config.TESSERACT_CMD
 
     src = Path(args.input)
     if not src.exists():
-        sys.exit(f"Input file not found: {src}")
+        sys.exit(f"Input not found: {src}")
+    inputs = collect_inputs(src)
+    if not inputs:
+        sys.exit(f"No PDF or image files in {src}")
 
-    client = get_client()
-    if not check_model_available(client, args.model):
-        sys.exit(
-            f"Could not find model '{args.model}' on your local Ollama server.\n"
-            f"  1. Make sure Ollama is running (it starts automatically after install on Windows,\n"
-            f"     or run 'ollama serve' in a terminal).\n"
-            f"  2. Pull the model:  ollama pull {args.model}"
-        )
+    client = None
+    if not args.no_model:
+        from ollama_client import check_model_available, get_client
+        client = get_client(config.OLLAMA_HOST)
+        if not check_model_available(client, args.model):
+            print(f"  ! Model '{args.model}' not available on Ollama ({config.OLLAMA_HOST}); "
+                  f"continuing without it. Run: ollama pull {args.model}", file=sys.stderr)
+            client = None
 
-    print(f"[1/3] Extracting text/tables from {src.name} ...")
-    doc = extraction.load_document(src)
+    labels = _labels()
+    results = []
+    for path in inputs:
+        print(f"Reading {path.name} ...")
+        t0 = time.time()
+        try:
+            records = read_drawing(path, force_ocr=args.force_ocr, labels=labels)
+        except Exception as e:
+            print(f"  ! could not read {path.name}: {e}", file=sys.stderr)
+            continue
+        for rec_obj in records:
+            rec = rec_obj.to_dict()
+            findings = rules.run_rules(rec)
+            lang, trace = language.check_language(
+                rec, client=client, model=args.model,
+                extra_words=config.EXTRA_ENGINEERING_WORDS, options=config.LANGUAGE_OPTIONS)
+            findings += lang
+            deep = None
+            if args.deep and client is not None:
+                import audit
+                deep = audit.audit_drawing(record_to_markdown(rec), client, model=args.model,
+                                           use_thinking=config.USE_THINKING)
+                for f in deep.get("findings", []):
+                    f["source"] = "model-deep"
+                    findings.append(f)
+            for i, f in enumerate(findings, 1):
+                f["id"] = f"F{i}"
+            status = rules.overall_status(findings)
+            secs = time.time() - t0
+            print(f"  page {rec['page']}: {status}  ({rec['text_source']}, {secs:.1f}s, "
+                  f"{sum(1 for f in findings if f['severity'] != 'info')} finding(s))")
+            results.append({"record": rec, "findings": findings, "status": status,
+                            "seconds": secs, "language_trace": trace, "deep": deep})
 
-    sources = ", ".join(sorted({p.source for p in doc.pages}))
-    orientations = ", ".join(f"p{p.page_number}={p.orientation}"
-                              + (f"(rotated {p.rotation_applied_deg}deg)" if p.rotation_applied_deg else "")
-                              for p in doc.pages)
-    print(f"       text source: {sources}  |  orientation: {orientations}")
-
-    print("[2/3] Structuring title block + BOM ...")
-    structured = structuring.build_structured_document(doc)
-    structured_md = structuring.to_markdown(structured)
-    print(f"       title block: {structured['title_block_cell_count']} bordered field box(es) "
-          f"detected ({structured['title_block_method']})")
-
-    thinking_label = "on" if not args.no_thinking else "off"
-    print(f"[3/3] Auditing with {args.model} (thinking={thinking_label}) - this can take a "
-          f"while on first load / CPU-only hardware ...")
-    audit_result = audit.audit_drawing(
-        structured_md, client, model=args.model, use_thinking=not args.no_thinking
-    )
-
-    out_path = Path(args.output) if args.output else config.DEFAULT_OUTPUT_DIR / f"{src.stem}_report.md"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(build_report_markdown(src, structured, audit_result), encoding="utf-8")
-
+    if not results:
+        sys.exit("Nothing could be read.")
+    name = src.name if src.is_dir() else src.stem
+    out = Path(args.output) if args.output else config.DEFAULT_OUTPUT_DIR / f"{name}_report.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(build_report(results), encoding="utf-8")
     if args.json:
-        json_path = out_path.with_suffix(".json")
-        json_path.write_text(
-            json.dumps({"structured": structured, "audit": audit_result}, indent=2, default=str),
-            encoding="utf-8",
-        )
-        print(f"Structured JSON: {json_path}")
-
-    print(f"\nStatus: {audit_result.get('overall_status')}")
-    print(f"Report written to: {out_path}")
+        slim = [{**r, "record": {k: v for k, v in r["record"].items() if k != "text_lines"}} for r in results]
+        out.with_suffix(".json").write_text(json.dumps(slim, indent=2, default=str), encoding="utf-8")
+    print(f"\nReport written to {out}")
+    return results
 
 
 if __name__ == "__main__":

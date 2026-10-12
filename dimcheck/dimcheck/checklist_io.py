@@ -48,13 +48,51 @@ def _find_data_table(document: docx.Document, zone_col: int, dim_col: int) -> Op
     return best
 
 
+def ensure_docx(path: str) -> str:
+    """python-docx only reads .docx. A legacy .doc checklist is converted
+    first: with LibreOffice if installed, otherwise with Microsoft Word
+    through COM on Windows (pip install pywin32). Returns the .docx path."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not path.lower().endswith(".doc"):
+        return path
+    out_dir = tempfile.mkdtemp(prefix="dimcheck_")
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", out_dir, path],
+                       check=True, capture_output=True, timeout=180)
+        out = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + ".docx")
+        if os.path.exists(out):
+            return out
+    try:
+        import win32com.client  # type: ignore
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        try:
+            doc = word.Documents.Open(os.path.abspath(path))
+            out = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + ".docx")
+            doc.SaveAs2(out, FileFormat=16)  # wdFormatXMLDocument
+            doc.Close()
+        finally:
+            word.Quit()
+        return out
+    except ImportError:
+        pass
+    raise RuntimeError(
+        f"'{path}' is a legacy .doc file. Save it as .docx in Word, or install LibreOffice "
+        "(soffice) or pywin32 (Windows + Word) so it can be converted automatically.")
+
+
 def load_checklist_rows(
     docx_path: str,
     zone_col: int = 1,
     dim_col: int = 2,
     tol_col: int = 3,
 ) -> "tuple[docx.Document, Table, List[ChecklistRow]]":
-    document = docx.Document(docx_path)
+    document = docx.Document(ensure_docx(docx_path))
     table = _find_data_table(document, zone_col, dim_col)
     if table is None:
         raise ValueError(
