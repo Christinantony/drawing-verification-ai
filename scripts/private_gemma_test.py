@@ -30,8 +30,8 @@ def main():
             with fitz.open(path) as document:
                 entry["pages"] = len(document)
         manifest.append(entry)
-    if sum(e.get("pages", 0) for e in manifest) != 18:
-        raise RuntimeError("Expected 18 PDF pages in this test set.")
+    if sum(e.get("pages", 0) for e in manifest) != 5:
+        raise RuntimeError("Expected five single-page PDFs in this test set.")
     output = root / "live-results"
     output.mkdir(exist_ok=True)
     (output / "input-manifest.json").write_text(json.dumps(manifest, indent=2))
