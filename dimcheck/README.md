@@ -1,148 +1,54 @@
-# dimcheck — drawing tolerance → checklist filler
+# dimcheck: drawing tolerances ↔ inspection checklist
 
-> **Repository status:** all modules — `pdf_layout.py`, `zoning.py`,
-> `general_tolerance.py`, `dimension_matcher.py`, `checklist_io.py` and
-> `pipeline.py` — are present, and `check_tolerances.py` runs end to end.
-> Every stage is covered by tests in `../tests/test_dimcheck.py`, including
-> `dimension_matcher.py`'s zone-cell matching and the full PDF-to-filled-DOCX
-> pipeline, run against the synthetic drawing. The six-of-six result
-> described below comes from the original development run against a real
-> drawing/checklist pair, not from this repository's tests.
+Reads the tolerance of every dimension listed on a dimension inspection checklist off the drawing, using each row's **zone** (ISO 7200-style border grid, e.g. `F6`) and **nominal dimension**. For each checklist row:
 
-Reads tolerances off an engineering drawing PDF (zoned per ISO-7200-style
-border grids, e.g. "F6", "C5") and fills them into the Tolerance column of a
-dimension checklist DOCX, using each row's Zone + nominal Dimension to find
-the matching text on the drawing.
+- **empty Tolerance cell → fill it** from the drawing;
+- **filled cell → verify it** against the drawing and report `match` or `MISMATCH`. Existing values are never overwritten unless you pass `--overwrite`.
 
-Built and validated against a real Verdant Telemetry drawing + checklist
-pair — with the checklist's known-correct tolerances blanked out, the tool
-reproduces all six values exactly from the drawing alone.
+```powershell
+python check_tolerances.py DRAWING.pdf CHECKLIST.doc -o CHECKED.docx --report review.csv
+```
 
-On the published synthetic drawing (`../examples/synthetic_drawing.pdf`),
-run end to end against a four-row checklist:
+Legacy `.doc` checklists are converted automatically: with LibreOffice if it's installed, otherwise through Microsoft Word on Windows (`pip install pywin32`). The output is always `.docx`.
 
-![Zone grid, matched dimensions and general tolerances read from the synthetic drawing](../assets/dimcheck_overlay.png)
+## Result on a real checklist
 
-![Console report of check_tolerances.py: C3/25.0 and B2/12 resolved from the general table, two rows left unresolved](../assets/dimcheck_console.png)
+On a real drawing + checklist pair (a SolidWorks A3 sheet, 20 dimension rows), the tool gets **20 / 20** right, both when filling a blanked copy and when verifying the original. Before this rebuild it got 8 / 20 right and 2 silently wrong. The drawing is confidential and not in this repository. The breakdown:
 
-![The filled checklist: two tolerance cells filled, two left blank for a human](../assets/dimcheck_filled_checklist.png)
+| Printed on the drawing | Rows | Read as |
+| :--- | :---: | :--- |
+| Stacked limits, `0.0` over `-0.2`, signs as separate words, several on vertical dimensions | 6 | `0/-0.2`, `0/-0.1` |
+| `101.2 ±0.1` where SolidWorks draws the `±` as a graphic (text layer has `101.2` then `0.1`) | 9 | `±0.1` |
+| No tolerance printed: the general table by printed decimals (`102.0` → ONE DECIMAL) | 5 | `±0.1` |
 
-The thread callout in zone A1 and the dimension `999` are not on the sheet,
-so their cells stay empty and the CSV says why. `python ../tests/make_figures.py`
-regenerates the overlay.
+![dimcheck on the synthetic example: zone grid and four checklist dimensions located](../assets/dimcheck_overlay.png)
 
-**Known open issue:** asymmetric/unilateral limits (e.g. an upper limit with
-a zero lower limit, or vice versa, typically drawn as two stacked figures
-rather than a single `±` value) are not parsed correctly yet — the matcher
-falls through to the general-tolerance table instead of reading the actual
-printed limits. A fix (reading stacked limit figures above/below the
-dimension, including a bare `0` for one side) was in progress.
-
-**Planned:** route low-confidence/ambiguous matches (zone-boundary misses,
-thread/feature callouts, fit codes) through a locally-run Gemma 4 E4B model
-for a second-pass reasoning check instead of just flagging them, so fewer
-rows need manual review.
+![Console: verify mode, one planted MISMATCH](../assets/dimcheck_console.png)
 
 ## How it works
 
-1. **Read the drawing** (`pdf_layout.py`) — extracts every word and its
-   position. Uses the PDF's native text layer when present; falls back to
-   OCR (`tesseract` on a rasterized page) automatically when it isn't —
-   pass `--force-ocr` to force this for a drawing with a thin/unreliable
-   text layer.
-2. **Detect the zone grid** (`zoning.py`) — finds the column numbers along
-   the top/bottom margins and row letters along the left/right margins, and
-   builds cell boundaries from their positions. This is a spatial heuristic,
-   not a fixed template, so it should generalize to other drawings using the
-   same lettered/numbered border convention (assumes `<letter><number>`
-   zone codes, e.g. "F6" — pass a different convention by adjusting
-   `zoning.ZoneGrid` if a drawing uses `<number><letter>` instead).
-3. **Parse the general tolerance table** (`general_tolerance.py`) — the
-   title-block note like "WITHOUT DECIMAL ±1 / ONE DECIMAL ±0.1 / TWO
-   DECIMAL ±0.05 / ANGLE ±½°", used whenever a dimension has no tolerance
-   of its own.
-4. **Match each checklist row's dimension in its zone**
-   (`dimension_matcher.py`) — handles a few real wrinkles found even in the
-   one sample drawing:
-   - **rotated text**: dimension text rotated 180° can come back with
-     characters reversed ("8.5" → "5.8"); both orderings are checked.
-   - **multi-token dimensions**: e.g. "1.0" + "THRU" on the same line.
-   - **thread/feature callouts** ("M3", "M3 TAPPED HOLE") aren't plain
-     numbers, so they can't be matched to a decimal-place tier — the tool
-     flags these as an *assumption* rather than a fact.
-   - **explicit per-dimension tolerances** (± value, dual-limit `+x/-y`,
-     or a fit code like `H7`/`js6`) next to a dimension override the
-     general table. Fit codes are flagged for manual conversion rather than
-     guessed, since the numeric value depends on the nominal size range
-     (ISO 286 or equivalent).
-   - **asymmetric/unilateral limits** (e.g. `+0.10` over `0`, or `0` over
-     `-0.05`, usually drawn as two stacked figures rather than one `±`
-     value) — **currently a known bug**: see "Known open issue" above.
-   - **zone-boundary imprecision**: the grid is derived from label
-     positions, not the true printed tick marks, and a dimension's *text*
-     doesn't always sit exactly inside the cell its *leader line* points
-     into. If nothing matches in the exact cell, the search widens and the
-     result is marked lower confidence rather than silently accepted.
-5. **Write the checklist** (`checklist_io.py`) — finds the data table by
-   content (looking for a column of zone-code-shaped cells), not by
-   assuming a fixed table index, since in the sample template the header
-   row itself lives in the page header/footer (repeated per printed page)
-   rather than in the table.
+1. **Read the sheet** with the shared [`sheetreader`](../sheetreader/). Vertical dimensions keep their reading direction (the old reader returned `20.5` as `5.02`). Sheets without a text layer are OCR'd after being turned upright.
+2. **Zone grid** (`zoning.py`): column numbers along the top/bottom margins, row letters along the left/right, upright text only. This keeps the letters in the confidentiality note that runs up the border from being mistaken for row labels.
+3. **General tolerances**: read from the title block's own cells (`WITHOUT DECIMAL ±1 / ONE DECIMAL ±0.1 / TWO DECIMAL ±0.05 / ANGLE ±½°`).
+4. **Find the dimension** (`dimension_matcher.py`) **by value**: `102` finds `102.0`, `Ø20.7` finds `20.7` (Ø is a graphic), `*106.1` prefers the `*106.1` key characteristic. If it isn't in the exact zone cell, the search widens slightly and the row is marked medium confidence.
+5. **Read its tolerance** in the dimension text's own frame:
+   - one small figure on the baseline right after it means `±`;
+   - two figures one over the other are upper/lower limits;
+   - a fit code (`f7`, `H7`) is reported but never converted.
 
-## Usage
+   Figures belonging to a neighbouring dimension (raised but with nothing on the baseline) are ignored.
+6. **Write and report** (`pipeline.py`, `checklist_io.py`): the source of every value (`explicit` / `general_table` / `assumed` / `unresolved`), a confidence, and notes.
 
-```bash
-pip install pdfplumber python-docx pytesseract pillow --break-system-packages
-# tesseract and poppler-utils (pdftoppm) must be installed system packages
+## Options
 
-python check_tolerances.py DRAWING.pdf CHECKLIST.docx -o FILLED.docx --report review.csv
-```
-
-Options (see `python check_tolerances.py -h`):
-- `--page N` — which PDF page to read (0-indexed)
-- `--zone-col / --dim-col / --tol-col` — checklist column indices, if your
-  template differs from the default layout `[Sl No, Zone, Dimension,
-  Tolerance, ...]`
-- `--overwrite` — replace tolerance cells that already have a value
-  (default: leave them alone and just report them)
-- `--force-ocr`, `--ocr-dpi` — OCR controls for scanned drawings
-
-An example of the per-row review report is in
-[`example_output/review_report_demo.csv`](example_output/review_report_demo.csv).
+- `--page N`: PDF page (0-based).
+- `--zone-col / --dim-col / --tol-col`: checklist column indices if your template differs from `[Sl No, Zone, Dimension, Tolerance, ...]`.
+- `--overwrite`: replace checklist values that disagree with the drawing.
+- `--force-ocr`, `--ocr-dpi`: OCR controls.
 
 ## What still needs a human
 
-The tool is intentionally conservative: anything it can't resolve with
-confidence is left blank in the output and called out in the console
-report / CSV, rather than guessed silently. In practice this means:
-
-- **Asymmetric/unilateral limits** — not read correctly yet (see above);
-  double-check any row whose drawing uses this style until the fix lands.
-- **Fit/limit codes** (H7, js6, ...) — numeric value not looked up.
-- **Thread/feature callouts** with no explicit tolerance nearby — filled
-  with the general table's one-decimal tier as a labeled *assumption*,
-  flagged for confirmation.
-- **Medium/low confidence matches** — the dimension text was found outside
-  its expected zone cell; still filled in, but worth a spot-check.
-- **Legacy `.doc` checklists** — convert to `.docx` first, e.g.:
-  `soffice --headless --convert-to docx CHECKLIST.doc`
-
-## Files
-
-```
-dimcheck/
-  pdf_layout.py          PDF text/OCR extraction -> tokens with bounding boxes
-  zoning.py               Border-grid detection, zone <-> (x,y) mapping
-  general_tolerance.py    Title-block general tolerance table parser
-  dimension_matcher.py    Locate a checklist dimension on the drawing, find its tolerance
-  checklist_io.py         Read/write the checklist DOCX table
-  pipeline.py             Orchestrates the above, produces a review report
-check_tolerances.py       CLI entry point
-```
-
-## Extending to a batch of drawings
-
-For a folder of drawing/checklist pairs, loop `pipeline.process(...)` per
-pair (matching filenames by part number is usually enough, e.g. this
-sample's `VT-JH_40_A1-E-08...pdf` / `VT-F-DCL-JH_40_A1-E-08...docx`), and
-concatenate the CSV reports for a single review pass across the batch.
+- **Fit codes** (H7, f7): the limits depend on size (ISO 286) and aren't looked up.
+- **Thread and feature callouts** with no tolerance printed beside them: these get the ONE DECIMAL tier as a labelled *assumption*.
+- **Medium-confidence rows**: the dimension text sat just outside its zone cell.
+- **Rows marked `kept`**: the checklist has a value but the drawing value couldn't be read to compare.

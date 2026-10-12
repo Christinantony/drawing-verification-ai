@@ -1,52 +1,36 @@
-# Document coherence checker
+# coherence: cross-file consistency for a drawing set
 
-Scans a folder of drawing PDFs, Word documents and Excel workbooks for one
-product, uses a local Gemma model through Ollama to extract structured
-records, then applies deterministic rules to find inconsistencies **between**
-files.
+Point it at the folder for one product (drawing PDFs, dimension checklists, other Word/Excel files) and it reports where the files disagree with each other.
+
+```powershell
+python check_coherence.py path\to\folder --out coherence_report.md
+python check_coherence.py path\to\folder --no-model        # drawings + checklists only, no Ollama
+```
+
+Drawings are read with the shared [`sheetreader`](../sheetreader/) (text layer or OCR), so **no model is involved for PDFs or checklists**: every finding comes from the rules below.
 
 ## What it checks
 
-**Across drawing PDFs** (title block and BOM extracted per sheet):
+| Rule | Severity |
+| :--- | :--- |
+| Same drawing number on several sheets/files with a different revision, date or title | high |
+| A drawing's `NEXT ASSY.` parent doesn't list it in its BOM | high |
+| BOM description disagrees with the referenced drawing's title | medium |
+| A child's `NEXT ASSY.` points to a different drawing than the parent that lists it | medium |
+| Drawings on the **same template form** (e.g. `XY-F-DRG-01`) with different general tolerances | medium |
+| Checklist material or weight differs from its drawing's title block | high |
+| Checklist tolerance row differs from the drawing (dimcheck in verify mode) | high |
+| BOM line or `NEXT ASSY.` points to a drawing that isn't in the folder | low ("add it to check it") |
 
-- The same drawing number on several sheets with different revision, date or title.
-- A BOM line that references a drawing number missing from the file set.
-- A BOM description that disagrees with the referenced drawing's title.
-- `NEXT ASSY.` links that do not point to a known drawing, or are not
-  reciprocated in the parent assembly's BOM.
+Details that make this work on real sets:
 
-**Across Word and Excel files:**
+- **Drawing references vs hardware.** A BOM `REF.` counts as a drawing reference only if it starts like the drawing numbers in the set. Fasteners (`M2.5x4 CSK SCREWS`), materials (`LOCTITE 263`) and vendor part numbers are not expected to have drawings.
+- **Combined drawings.** A drawing numbered `…-E-03 A&B` answers to BOM references `…-E-03A` and `…-E-03B`.
+- **OCR look-alikes.** On OCR'd sheets, a number that matches a known drawing number except for look-alike characters (`AI-` for `AT-`) is corrected against the exact numbers from file names and text-layer sheets. The report shows the corrected value.
+- **Checklists** are matched to their drawing by the longest shared file-name ending (`XX-F-DCL-PART_REV._00.doc` ↔ `PART_REV._00.pdf`).
 
-- The same part number appearing with different names, revisions or dates.
-- An optional fuzzy pass that asks the model whether differently named,
-  unnumbered parts are the same part, reported for manual verification.
+Other `.docx` / `.xlsx` files still go through the original model-based extraction (Gemma via Ollama): the same part number with different names, revisions or dates, plus an optional fuzzy same-part pass.
 
-The model only extracts fields; every pass/fail decision is made by the
-rules in `check_drawings()` and `find_generic_mismatches()`, which are covered
-by `../tests/test_coherence.py`.
+![Cross-file rules on a small drawing set](../assets/coherence_rules.png)
 
-![check_drawings() on a parent assembly and two sheets of one part: four issues raised](../assets/coherence_rules.png)
-
-*The drawing set from `../tests/test_coherence.py`, run through the real rules
-(`python ../tests/make_figures.py`). No model is involved in this step.*
-
-## Usage
-
-```bash
-pip install python-docx openpyxl requests pdfplumber
-ollama pull gemma3:4b
-
-python check_coherence.py path/to/folder --out coherence_report.md
-python check_coherence.py path/to/folder --model gemma4:e4b --skip-fuzzy
-```
-
-The default model is `gemma3:4b`, which was used when this script was
-written; any Ollama model tag can be passed with `--model`.
-
-## Limitations
-
-- PDF text is read with pdfplumber only. Scanned or rotated sheets with no
-  usable text are listed under "Pages needing OCR / rotation" and skipped;
-  the OCR and orientation handling lives in `../drawing-audit/`.
-- Extraction quality depends on the model reading jumbled PDF text
-  correctly; a wrong extraction can cause a false finding.
+*`check_drawings()` on the hand-built records from `../tests/test_coherence.py`.*

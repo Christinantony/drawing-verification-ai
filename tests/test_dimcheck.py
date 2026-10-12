@@ -144,3 +144,66 @@ def test_pipeline_leaves_unmatched_row_unresolved(tmp_path):
     assert reports[0].resolved_tolerance is None
     assert reports[0].source == "unresolved"
     assert reports[0].notes
+
+
+# ---------------------------------------------------------------------------
+# CAD-like drawing: stacked limits, "±" drawn as a graphic, vertical text,
+# value matching, verify mode.
+# ---------------------------------------------------------------------------
+
+def _build_filled_checklist(path, rows):
+    """rows: (zone, dimension, tolerance-or-'')"""
+    document = docx.Document()
+    table = document.add_table(rows=len(rows) + 1, cols=4)
+    for c, h in zip(table.rows[0].cells, ("Sl No", "ZONE", "DIMENSIONS", "TOLERANCE")):
+        c.text = h
+    for i, (zone, dim, tol) in enumerate(rows, start=1):
+        cells = table.rows[i].cells
+        cells[0].text, cells[1].text, cells[2].text, cells[3].text = str(i), zone, dim, tol
+    document.save(str(path))
+
+
+def test_stacked_symmetric_and_vertical_tolerances_are_read(cad_pdf):
+    layout = load_page_layout(str(cad_pdf))
+    grid = detect_grid(layout.tokens, layout.page_width, layout.page_height)
+    stacked = find_dimension(layout.tokens, grid, "C4", "50.0")
+    assert stacked.tolerance and stacked.tolerance.format() == "0/-0.2"
+    sym = find_dimension(layout.tokens, grid, "C3", "30.5")
+    assert sym.tolerance and sym.tolerance.format() == "±0.1"
+    vertical = find_dimension(layout.tokens, grid, "B4", "40.0")
+    assert vertical.tolerance and vertical.tolerance.format() == "0/-0.1"
+    plain = find_dimension(layout.tokens, grid, "B3", "12")
+    assert plain.tolerance is None and plain.matched_text == "12"
+
+
+def test_checklist_values_match_drawing_by_value_not_text(cad_pdf):
+    layout = load_page_layout(str(cad_pdf))
+    grid = detect_grid(layout.tokens, layout.page_width, layout.page_height)
+    m = find_dimension(layout.tokens, grid, "C4", "50")        # checklist "50", drawing "50.0"
+    assert m.matched_text == "50.0"
+    m = find_dimension(layout.tokens, grid, "C3", "Ø30.5")     # Ø is a graphic on the drawing
+    assert m.matched_text == "30.5"
+
+
+def test_verify_mode_reports_match_and_mismatch(cad_pdf, tmp_path):
+    chk = tmp_path / "chk.docx"
+    _build_filled_checklist(chk, [("C4", "50.0", "0/-0.2"), ("C3", "30.5", "±0.2"),
+                                  ("B3", "12", ""), ("B4", "40.0", "0.0/-0.10")])
+    out = tmp_path / "out.docx"
+    reports = process(str(cad_pdf), str(chk), str(out))
+    verdicts = {r.dimension: r.verdict for r in reports}
+    assert verdicts == {"50.0": "match", "30.5": "MISMATCH", "12": "filled", "40.0": "match"}
+    mism = next(r for r in reports if r.verdict == "MISMATCH")
+    assert "Checklist says ±0.2, drawing says ±0.1" in mism.notes[0]
+    table = docx.Document(str(out)).tables[0]
+    assert table.rows[2].cells[3].text == "±0.2"   # existing value never overwritten by default
+    assert table.rows[3].cells[3].text == "±1"     # empty cell filled from the general table
+
+
+def test_tolerance_text_comparison():
+    from dimcheck.pipeline import same_tolerance
+    assert same_tolerance("0/-0.2", "+0.0/-0.20")
+    assert same_tolerance("± 0.1", "±0.1")
+    assert same_tolerance("-0.2/0", "0/-0.2")
+    assert not same_tolerance("±0.1", "0/-0.1")
+    assert same_tolerance("H7", "±0.1") is None

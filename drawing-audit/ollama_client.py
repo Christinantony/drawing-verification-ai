@@ -91,3 +91,17 @@ def extract_json(content: str) -> Optional[dict]:
         return json.loads(brace_match.group(0))
     except json.JSONDecodeError:
         return None
+
+
+def extract_json_list(content: str) -> Optional[list]:
+    """Like extract_json, for a top-level JSON array (``[...]``)."""
+    fence = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
+    candidate = fence.group(1) if fence else content
+    m = re.search(r"\[.*\]", candidate, re.DOTALL)
+    if not m:
+        return None
+    try:
+        val = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return val if isinstance(val, list) else None

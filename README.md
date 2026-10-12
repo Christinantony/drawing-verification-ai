@@ -1,115 +1,118 @@
 # Drawing Verification AI
 
-**Offline checking of engineering drawings and their documents, using a locally run Gemma 4 E4B model.**
+**Offline checking of engineering drawings and their inspection documents, with a locally run Gemma 4 E4B model.**
 
-Drawing review is slow, repetitive and easy to get wrong: a misspelled title, a BOM line that names a part number with no drawing behind it, a `NEXT ASSY.` link that the parent assembly never lists, or a tolerance copied into the inspection checklist from the wrong row. This repository holds three tools that automate those first-pass checks, so a reviewer starts from a list of suspected problems instead of a blank sheet.
+Drawing review is slow, repetitive and easy to get wrong. Typical slips are a title-block scale that can't be right, a BOM line naming a drawing that isn't in the set, a `NEXT ASSY.` the parent never lists, or a checklist tolerance copied from the wrong row. This repository automates those first-pass checks, so a reviewer starts from a short list of suspected problems instead of a blank sheet.
 
-Everything runs on the engineer's own machine through [Ollama](https://ollama.com). No drawing, BOM or checklist leaves the computer.
+Everything runs on the engineer's own machine. No drawing, BOM or checklist leaves the computer.
 
-| Tool | Engineering problem | What it produces | Status |
-| :--- | :--- | :--- | :--- |
-| **[drawing-audit](drawing-audit/)** | One drawing: typos, contradictions in the title block, title block vs BOM mismatches | Markdown report with severity-ranked findings, extracted title block and BOM, and the model's reasoning trace | Complete pipeline |
-| **[dimcheck](dimcheck/)** | Filling the Tolerance column of a dimension inspection checklist by hand | Filled checklist `.docx` plus a per-row CSV saying where each tolerance came from and how confident the match is | Complete pipeline |
-| **[coherence](coherence/)** | A set of drawings and documents for one product that disagree with each other | Cross-file report: revision, date and title conflicts, missing BOM drawings, broken `NEXT ASSY.` links | Complete script |
+| Tool | Engineering problem | What it produces |
+| :--- | :--- | :--- |
+| **[drawing-audit](drawing-audit/)** | One drawing, or a folder of them: title block, revision table, BOM, scale, spelling | Markdown report per sheet: findings by severity, plus everything that was read |
+| **[dimcheck](dimcheck/)** | The Tolerance column of a dimension inspection checklist | Fills empty rows from the drawing and **verifies** filled ones (match / MISMATCH), with a per-row CSV |
+| **[coherence](coherence/)** | A drawing set and its checklists that disagree with each other | Cross-file report: BOM vs child drawings, `NEXT ASSY.` links, checklist vs drawing, template tolerances |
 
-## Key design decision: the model reads text, not pictures
+All three share one reader, **[sheetreader](sheetreader/)**, which turns any drawing PDF into structured data.
 
-Small vision models misread the dense, tiny text of a title block or BOM table. So the drawing-audit pipeline never asks Gemma to look at the drawing. Deterministic code extracts and structures the content first, and the model only reasons over clean text.
+## Works on the PDFs CAD tools actually produce
 
-```mermaid
-flowchart LR
-    A[Drawing PDF<br/>or scan] --> B{Text layer?}
-    B -- yes --> C[PyMuPDF text<br/>+ pdfplumber tables]
-    B -- no --> D[Orientation fix<br/>+ deskew + Tesseract OCR]
-    C --> E[Title-block cell isolation<br/>from CAD rectangles]
-    D --> F[Title-block cell isolation<br/>with OpenCV contours]
-    E --> G[Structured title block,<br/>BOM and notes as Markdown]
-    F --> G
-    G --> H[Gemma 4 E4B via Ollama<br/>thinking mode on]
-    H --> I[JSON findings<br/>PASS / NEEDS_REVIEW / FAIL]
-    I --> J[Markdown report<br/>for the reviewer]
-```
+The tools were rebuilt against real company drawings: two SolidWorks exports and three AutoCAD sheets plotted through *Microsoft Print to PDF*. They are confidential, so they are not in this repository. Those files showed that the obvious approach (look for rectangle objects, regex the text) fails on every one of them:
 
-- **OCR only as a fallback.** Vector PDFs exported from CAD are read exactly from their embedded text; OCR runs only on scanned pages, after Tesseract's orientation detection rotates sideways or upside-down sheets upright.
-- **One field per box.** Title blocks are usually drawn as bordered cells. The pipeline reads the CAD file's own rectangle entities (or detects the boxes with OpenCV on a scan), reads each cell separately, and pairs label-only boxes with the adjacent value box. Regex over the whole corner fills any gaps.
-- **Conservative reporting.** The audit prompt asks only for confident findings, treats missing fields as low severity, and reports garbled OCR as an `ocr_quality` finding rather than guessing a fix. Unparseable model output becomes a `NEEDS_REVIEW` result, never a silent pass.
-- **Rules decide, the model extracts.** In the coherence checker the model only pulls fields out of each file; every mismatch is raised by plain Python rules that can be read and tested.
-- **Traceable output.** dimcheck labels every tolerance as `explicit`, `general_table`, `assumed` or `unresolved` with a confidence level, and leaves a cell blank rather than guess.
+| What the real files do | How sheetreader handles it |
+| :--- | :--- |
+| Title blocks and BOMs are drawn from **loose line segments**, never rectangle objects | Each word is placed in the box its surrounding ruling lines enclose; words with the same box form a cell |
+| AutoCAD Print-to-PDF has **no text layer at all**: every letter is drawn as line strokes | Rasterise and OCR, after erasing ruling lines; each title-block and table cell is then re-read on its own |
+| The landscape sheet is **printed sideways** onto a portrait page | Try each rotation and keep the one where title-block labels actually read (Tesseract's own orientation guess scored 0.01 confidence on these) |
+| BOM header at the **bottom**, items numbered upward; one item spanning sub-rows | Rows are read outward from the header, in either direction, and anchored on the item-number cell |
+| **Vertical dimensions** came back reversed (`20.5` → `5.02`) | Every word keeps its reading direction; tolerances are found in the text's own frame |
+| `±` and `Ø` drawn as **graphics**; stacked limits (`0.0` over `-0.2`) as separate words | Tolerances read by position: a bare small figure after a dimension is ±, two figures one over the other are upper/lower limits |
+| OCR look-alikes (`VI-` for `VT-`, `±` read as `#`, `=` or `2`) | Identifiers from OCR are compared allowing look-alike characters; general tolerances pick the reading that is plausible for its tier |
 
-![What the extraction and structuring stages detected on the synthetic drawing: the title-block corner, ten bordered field boxes read one by one, the ruled BOM table and the notes](assets/extraction_overlay.png)
+![sheetreader on a SolidWorks-style export: cells from loose lines, title block, BOM with header at bottom, revision table, and stacked / ± / vertical tolerances](assets/sheetreader_overlay.png)
 
-*Stages 1 and 2 of drawing-audit run on `examples/synthetic_drawing.pdf`, with what they detected drawn over the sheet. The title-block fields come from the CAD rectangles, not from OCR; the BOM from the ruled table. This is the input the model receives (see [`examples/synthetic_structured_input.md`](examples/synthetic_structured_input.md)).*
+The same sheet as an image-only PDF, printed sideways like an AutoCAD plot, is read to the same title block and BOM:
 
-## Example
+![A sideways image-only PDF and what was read from it](assets/sideways_scan.png)
 
-[`examples/synthetic_drawing.pdf`](examples/synthetic_drawing.pdf) is a small synthetic drawing with a deliberate typo ("MOUNTING BRAKCET"), a zero-quantity BOM line, and a note citing "REV A" of a spec on a drawing at revision B. [`examples/synthetic_structured_input.md`](examples/synthetic_structured_input.md) is the real output of the extraction and structuring stages for it: the exact text the model receives, with all five title-block fields read from their own boxes and the BOM read from the ruled table.
+## Rules decide, the model proofreads
 
-### dimcheck on the same drawing
+At about 7 tokens/s on a typical office PC, asking Gemma to reason over a whole drawing with thinking on takes several minutes per sheet. Most of what it was asked to notice is mechanical anyway, so it is now done by plain, tested Python rules:
 
-![dimcheck: the zone grid detected from the border labels, the two checklist dimensions found in their zones, and the general tolerance note](assets/dimcheck_overlay.png)
+- **Title block:** every field present; the drawing number and revision match the file name; DRAWN is not also APPROVED.
+- **Revisions and sheet:** the title-block revision matches the latest revision-table entry; SIZE matches the real sheet size; the date is valid and not in the future.
+- **Scale:** the title-block scale can fit the largest dimension on the sheet.
+- **BOM:** no duplicate or skipped item numbers; no zero or blank quantities.
 
-The CLI, run on a four-row checklist. Two rows are filled from the drawing; the thread callout and a dimension that is not on the sheet are left blank and reported, never guessed:
+Spelling uses three layers. A list of known engineering misspellings comes first (ANEROBIC → ANAEROBIC, SILICON sealant → SILICONE). An offline dictionary with an allow-list of shop terms comes next. Only then does **one short Gemma call with thinking off** see just the text lines. A phrase the model reports must actually appear on the drawing, so it can't invent a finding. The original full reasoning audit is still available as `--deep`.
 
-![check_tolerances.py console output: two rows resolved from the general table at high confidence, two unresolved](assets/dimcheck_console.png)
+On the five real drawings these rules raised:
 
-![The filled checklist .docx: tolerance cells filled for the two matched rows, blank for the other two](assets/dimcheck_filled_checklist.png)
-
-### coherence rules
-
-![The cross-drawing rules applied to a parent assembly and two sheets of one part: revision mismatch, a BOM line pointing at a drawing that is not in the set, and NEXT ASSY. links the parent BOM does not reciprocate](assets/coherence_rules.png)
-
-*`check_drawings()` on the hand-built records from `tests/test_coherence.py`. The model is only used to extract these records from real files; the findings are produced by the rules.*
-
-The figures above are produced by `python tests/make_figures.py` from real runs of the deterministic stages. No model output is shown: the Gemma stage needs a running Ollama server, which the test environment does not have.
-
-## Quick start
-
-```bash
-ollama pull gemma4:e4b
-cd drawing-audit
-pip install -r requirements.txt
-python main.py path/to/drawing.pdf --json
-```
-
-Windows setup, Tesseract installation and template tuning are covered in [drawing-audit/README.md](drawing-audit/README.md).
+- a title-block **SCALE 10:1** on a 508 mm part on A3 (it would be 5 m long on paper; the section view on the same sheet says 1:4);
+- **ANEROBIC** and **SILICON SEALANT** in a BOM;
+- drawings on the **same template form** with different general tolerances (ONE DECIMAL ±0.5 vs ±0.1).
 
 ## Validation
 
-| What | How it was checked |
+| What | Result |
 | :--- | :--- |
-| Extraction, cell isolation, BOM parsing, report structuring | `tests/test_drawing_audit.py` on the synthetic vector PDF |
-| Audit stage JSON handling and fallback | Same file, with a stub client in place of Ollama |
-| Zone grid detection, general-tolerance parsing, dimension matching, full checklist fill | `tests/test_dimcheck.py` on the synthetic PDF and a hand-built checklist `.docx` |
-| Cross-drawing and cross-document rules | `tests/test_coherence.py` with hand-built records |
+| dimcheck on a real drawing + inspection checklist (20 dimension rows: six stacked limits, nine printed `±` values, five from the general table) | **20 / 20** correct, both filling a blanked checklist and verifying the original `.doc`. Before the rebuild: 8 / 20, with 2 silently wrong |
+| Title block, BOM and revision table on the five real drawings | All fields and every BOM row read correctly, checked by eye against each sheet. BOM items: 11 / 11, 6 / 6, 5 / 5 |
+| Public test suite (synthetic drawings only, no model) | 37 tests: reader, rules, language layers, dimcheck fill/verify, cross-file rules, and the sideways image-only scan through OCR |
 
 ```bash
-pip install -r drawing-audit/requirements.txt python-docx openpyxl requests pytest
+pip install -r requirements.txt pytest
 python -m pytest
 ```
 
-The tests do not call a model, so they verify the deterministic stages, not Gemma's judgement. The dimcheck result in its README (six of six tolerances reproduced on a real drawing and checklist pair) comes from the original development run; that drawing is not published here.
+![pytest summary](assets/tests_passing.png)
 
-![pytest: 19 passed, covering coherence, dimcheck and drawing-audit](assets/tests_passing.png)
+The real-drawing results come from `tests/test_real_samples.py`. It runs only when `DVA_SAMPLES_DIR` points at a local folder holding the drawings and an `expected.json`, so the confidential files never enter the repository.
 
-Writing these tests found one bug in the general-tolerance parser: `ANGLE ±1/2°` was read as `±1`. It is fixed in this repository.
+The tests don't call a model, so they verify the deterministic stages, not Gemma's judgement.
+
+## Example
+
+[`examples/XY-100-01_REV.01.pdf`](examples/XY-100-01_REV.01.pdf) is a synthetic drawing built like a SolidWorks export. [`examples/XY-100-01_REV.01_sideways_scan.pdf`](examples/XY-100-01_REV.01_sideways_scan.pdf) is the same sheet as a sideways, image-only plot. Both produce the same findings: [text-layer report](examples/XY-100-01_REV.01_report.md), [scan report](examples/XY-100-01_REV.01_sideways_scan_report.md).
+
+dimcheck verifying a filled checklist against it, with one planted wrong value:
+
+![dimcheck console: three rows match or are filled, one MISMATCH](assets/dimcheck_console.png)
+
+## Quick start (Windows)
+
+1. Install [Python 3.10+](https://www.python.org/downloads/) (tick **Add python.exe to PATH**), [Ollama](https://ollama.com/download), and [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki). Tesseract is needed only for sheets without a text layer.
+2. In PowerShell, in this folder:
+
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+ollama pull gemma4:e4b
+
+python drawing-audit\main.py path\to\drawings            # every PDF in the folder
+python dimcheck\check_tolerances.py DRAWING.pdf CHECKLIST.doc -o CHECKED.docx --report review.csv
+python coherence\check_coherence.py path\to\drawing_set --out coherence_report.md
+```
+
+`drawing-audit` and `coherence` also work with no model at all (`--no-model`). Then only the rules, known misspellings and dictionary run.
 
 ## Limitations
 
 - These are first-pass review aids, not certified inspection tools. Every finding needs an engineer's confirmation.
-- Title-block and BOM extraction is heuristic and tuned through `drawing-audit/config.py`; unusual templates may need new label aliases or region settings.
-- Gemma 4 E4B is a small on-device model and can miss subtle errors or raise false positives. CPU-only runs with thinking mode are slow.
-- Notes extraction is simple and can carry list numbering or neighbouring text into a note.
-- dimcheck's asymmetric/unilateral stacked-figure tolerances (two numbers above/below the dimension line, rather than an inline `±` value) are a known open issue: they currently fall through to the general tolerance table instead of being read as an explicit value.
-- The coherence checker reads PDF text only and skips scanned sheets.
+- OCR'd sheets (no text layer) are read well but not perfectly: a weight like `120±5 g` can come back as `12045 g`. Values read by OCR are labelled as such in every report. Exporting PDFs from CAD with text kept as text (TrueType rather than SHX fonts) makes every check exact and takes a sheet from about 20 s to under 1 s.
+- Title-block wording outside the built-in label list needs adding to `drawing-audit/config.py` (`EXTRA_TITLE_BLOCK_LABELS`).
+- The scale check uses the largest dimension value on the sheet; a view drawn at a different scale from the title block can make it pass when it shouldn't, never the reverse.
+- Gemma 4 E4B is a small on-device model; its spelling suggestions are labelled `(model)` in the report.
 
 ## Repository layout
 
 ```
-drawing-audit/   single-drawing audit pipeline (Gemma 4 E4B, Ollama, PyMuPDF, OpenCV, Tesseract)
-dimcheck/        drawing tolerances -> inspection checklist .docx
-coherence/       cross-file consistency checks for a drawing and document set
-examples/        synthetic drawing and its structured model input
-tests/           pytest suite for the deterministic stages
+sheetreader/     shared reader: text layer or OCR -> words, ruling lines, cells, title block, tables
+drawing-audit/   per-drawing rules, language check (Gemma 4 E4B via Ollama), report
+dimcheck/        drawing tolerances -> inspection checklist (.docx / .doc), fill and verify
+coherence/       cross-file checks for a drawing set and its checklists
+examples/        synthetic drawing, its sideways scan, and their reports
+tests/           pytest suite; synthetic drawing generators; local-only real-drawing tests
 assets/          README figures, written by tests/make_figures.py
 ```
 

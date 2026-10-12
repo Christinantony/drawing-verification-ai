@@ -8,3 +8,8 @@ reports/
 ~$*
 Thumbs.db
 .DS_Store
+
+# Real drawings and checklists stay local (see tests/test_real_samples.py)
+samples/
+local_samples/
+coherence_report.md
