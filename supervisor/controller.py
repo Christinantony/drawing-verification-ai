@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import time
+import json
 
 from .model import system_message
 from .protocol import PROTOCOL_VERSION, parse, validate_assessment
 from .store import digest, dumps
 from .tools import Tools
+from .schema import review_schema
 
 
 class Controller:
@@ -69,6 +71,7 @@ class Controller:
         reviewed = sorted({e for a in assessments for e in a["reviewed_ids"]})
         required = sorted({e for g in self.ws.groups for e in g["required_ids"]})
         result = {"run_id": self.ws.run, "manifest": self.ws.manifest, "model": identity,
+                  "supervisor_status": "completed" if identity and not failures and set(reviewed) == set(required) else "incomplete",
                   "coverage": "complete" if not unresolved and set(reviewed) == set(required) else "incomplete",
                   "issue_status": "issues_found" if any(f["severity"] != "info" for f in findings) else "no_issue_found",
                   "required_ids": required, "reviewed_ids": reviewed, "findings": findings,
@@ -84,7 +87,10 @@ class Controller:
         required = group["required_ids"]
         allowed = set(required)
         baseline = [f for f in ws.baseline if set(f["evidence_ids"]) & set(required)]
-        package = {"required_ids": required, "evidence": [ws.evidence[e] for e in required],
+        # Keep complete text in the prompt. Repeated hashes and source geometry
+        # stay in the ledger and remain available through tools.
+        fields = ("id", "kind", "text", "file", "page", "location", "chunk", "chunks", "char_start")
+        package = {"required_ids": required, "evidence": [{k: ws.evidence[e][k] for k in fields if k in ws.evidence[e]} for e in required],
                    "related_index": tools.get_related_records(required[0]),
                    "baseline_findings": baseline[:8], "baseline_finding_count": len(baseline),
                    "baseline_more": len(baseline) > 8,
@@ -101,7 +107,7 @@ class Controller:
             validate_assessment(cached, required, ws.evidence, allowed)
             ws.store.event(ws.run, "assessment_cache_hit", {"group": group["id"]})
             return cached, [{"cache_hit": True}]
-        messages = [system_message(), {"role": "user", "content": dumps(package)}]
+        messages = [system_message(), {"role": "user", "content": json.dumps(package, ensure_ascii=False, separators=(",", ":"))}]
         deadline = time.monotonic() + self.seconds
         metrics, tool_used, blocked = [], False, []
         for turn in range(self.rounds + 1):
@@ -115,7 +121,8 @@ class Controller:
             if byte_budget + self.max_tokens + image_reserve + 512 > self.client.context:
                 raise ValueError("Context budget exhausted; split evidence or increase --context")
             content, counters = self.client.chat(messages, thinking=thinking, timeout=remaining,
-                                                  max_tokens=self.max_tokens)
+                                                  max_tokens=self.max_tokens,
+                                                  response_schema=review_schema(required, turn == self.rounds))
             metrics.append(counters)
             ws.store.event(ws.run, "model_turn", {"group": group["id"], "turn": turn,
                 "thinking": thinking, "response": content, "metrics": counters})

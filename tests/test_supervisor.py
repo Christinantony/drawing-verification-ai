@@ -261,6 +261,51 @@ def test_malformed_tool_schema_rejected():
         parse('{"kind":"tools","requests":[{"name":"shell","arguments":{}}]}')
 
 
+def test_single_json_wrapper_is_accepted_but_prose_is_not():
+    answer = json.dumps(final(["source"]))
+    assert parse("```json\n" + answer + "\n```") == final(["source"])
+    for bad in ("Here is the JSON: " + answer,
+                "```json\n" + answer + "\n```\nextra",
+                "```json\n{}\n```\n```json\n{}\n```", ""):
+        with pytest.raises(ValueError):
+            parse(bad)
+
+
+def test_schema_is_sent_and_vision_uses_its_own_shape(monkeypatch):
+    from supervisor.schema import COLOR_SCHEMA, PROTOCOL_SCHEMA
+    model = Ollama()
+    seen = []
+    def request(path, payload, timeout):
+        seen.append(payload)
+        return {"message": {"content": '{"color":"red"}'}, "done_reason": "stop"}
+    monkeypatch.setattr(model, "request", request)
+    try:
+        model.chat([])
+        model.chat([], response_schema=COLOR_SCHEMA)
+        assert seen[0]["model"] == seen[1]["model"] == "gemma4:e4b"
+        assert seen[0]["format"] == PROTOCOL_SCHEMA
+        assert seen[1]["format"] == COLOR_SCHEMA
+    finally:
+        model.close()
+
+
+def test_compact_package_keeps_all_text_and_allows_realistic_context(workspace):
+    # A large complete text section must reach the model. Repeated provenance
+    # metadata is retained in the ledger, rather than consuming prompt space.
+    eid = workspace.groups[0]["id"]
+    workspace.evidence[eid]["text"] = "dimension 12 mm\n" * 280
+    model = FakeModel()
+    model.context = 16384
+    result = Controller(workspace, model, max_tokens=2000).review()
+    assert model.calls
+    package = json.loads(model.calls[0][0][1]["content"])
+    assert package["evidence"][0]["text"] == workspace.evidence[eid]["text"]
+    assert "file_hash" not in package["evidence"][0]
+    assert workspace.evidence[eid]["file_hash"]
+    assert result["supervisor_status"] == "completed"
+    assert result["coverage"] == "incomplete"  # Missing child evidence remains.
+
+
 def test_bad_file_still_appears_as_incomplete(tmp_path):
     pdf = tmp_path / "bad.pdf"; pdf.write_bytes(b"not a pdf")
     store = Store(tmp_path / "out" / "state.db")
@@ -363,6 +408,7 @@ def test_transport_uses_local_http_protocol():
                 self.reply({"capabilities": ["completion", "vision"]})
             else:
                 prompt = payload["messages"][0]["content"]
+                assert isinstance(payload["format"], dict)
                 answer = prompt[prompt.index('{'):]
                 self.reply({"message": {"content": answer}, "done_reason": "stop"})
         def reply(self, value):

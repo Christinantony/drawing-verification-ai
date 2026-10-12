@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import requests
 
 from .protocol import SYSTEM, TOOL_SPECS
+from .schema import PROTOCOL_SCHEMA
 
 
 class Ollama:
@@ -48,9 +49,10 @@ class Ollama:
             raise ValueError("Model digest is absent; cannot establish review identity")
         return self.identity
 
-    def chat(self, messages, thinking=False, timeout=None, max_tokens=1000):
+    def chat(self, messages, thinking=False, timeout=None, max_tokens=1000, response_schema=None):
         payload = {"model": self.model, "messages": messages, "stream": False,
                    "think": thinking, "keep_alive": "10m",
+                   "format": PROTOCOL_SCHEMA if response_schema is None else response_schema,
                    "options": {"num_ctx": self.context, "num_predict": max_tokens,
                                "temperature": 1.0, "top_p": 0.95, "top_k": 64}}
         response = self.request("/api/chat", payload, timeout)
@@ -60,7 +62,10 @@ class Ollama:
         if not isinstance(msg.get("content"), str):
             raise ValueError("Model returned no final text")
         # Retain concise result and runtime counters, never recycle thinking traces.
-        metrics = {k: response.get(k) for k in ("total_duration", "load_duration", "prompt_eval_count", "eval_count")}
+        if not msg["content"].strip():
+            raise ValueError("Model returned empty final text")
+        metrics = {k: response.get(k) for k in ("total_duration", "load_duration", "prompt_eval_count",
+                    "prompt_eval_duration", "eval_count", "eval_duration", "done_reason")}
         return msg["content"], metrics
 
     def close(self):

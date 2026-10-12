@@ -48,7 +48,8 @@ def parser():
 
 
 def doctor(client, smoke=False, vision=False):
-    from .protocol import parse
+    from .protocol import parse, decode_json
+    from .schema import COLOR_SCHEMA
     identity = client.preflight()
     report = {"model": identity, "checks": []}
     if vision and not smoke:
@@ -58,7 +59,10 @@ def doctor(client, smoke=False, vision=False):
             response, metrics = client.chat([{"role": "user", "content":
                 'Return only this JSON object: {"kind":"assessment","reviewed_ids":[],"findings":[],"unresolved":[],"entities":[]}'}],
                 thinking=thinking, max_tokens=1200)
-            obj = parse(response)
+            try:
+                obj = parse(response)
+            except ValueError as exc:
+                raise ValueError(f"Text protocol check (thinking={thinking}): {exc}; final response={response[:240]!r}") from exc
             if obj != {"kind": "assessment", "reviewed_ids": [], "findings": [], "unresolved": [], "entities": []}:
                 raise ValueError("Protocol smoke check failed")
             report["checks"].append({"thinking": thinking, "result": "passed", "metrics": metrics})
@@ -76,8 +80,13 @@ def doctor(client, smoke=False, vision=False):
             data = io.BytesIO(); image.save(data, format="PNG")
             response, metrics = client.chat([{"role": "user", "content":
                 'Identify the rectangle color. Return only a JSON object with one key, color, and the color name as its value.',
-                "images": [base64.b64encode(data.getvalue()).decode()]}], max_tokens=100)
-            if json.loads(response).get("color") != "red":
+                "images": [base64.b64encode(data.getvalue()).decode()]}], max_tokens=100,
+                response_schema=COLOR_SCHEMA)
+            try:
+                color = decode_json(response)
+            except ValueError as exc:
+                raise ValueError(f"Vision JSON check: {exc}; final response={response[:240]!r}") from exc
+            if color != {"color": "red"}:
                 raise ValueError("Vision smoke check failed")
             report["checks"].append({"vision": "passed", "metrics": metrics})
     return report
