@@ -23,11 +23,12 @@ jobs:
     timeout-minutes: 90
     env:
       OLLAMA_HOST: 127.0.0.1:11434
-      OLLAMA_MODELS: ${{ runner.temp }}/gemma-models
       OLLAMA_NUM_PARALLEL: '1'
       OLLAMA_MAX_LOADED_MODELS: '1'
       OLLAMA_CONTEXT_LENGTH: '8192'
     steps:
+      - name: Set model storage path
+        run: echo "OLLAMA_MODELS=$RUNNER_TEMP/gemma-models" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
