@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import json
+from jsonschema import validate as validate_schema
 
 from .model import system_message
 from .protocol import PROTOCOL_VERSION, parse, validate_assessment
@@ -120,13 +121,15 @@ class Controller:
             image_reserve = 4096 * sum(len(m.get("images", [])) for m in messages)
             if byte_budget + self.max_tokens + image_reserve + 512 > self.client.context:
                 raise ValueError("Context budget exhausted; split evidence or increase --context")
+            schema = review_schema(required, turn == self.rounds, evidence=ws.evidence, allowed=allowed)
             content, counters = self.client.chat(messages, thinking=thinking, timeout=remaining,
                                                   max_tokens=self.max_tokens,
-                                                  response_schema=review_schema(required, turn == self.rounds))
+                                                  response_schema=schema)
             metrics.append(counters)
             ws.store.event(ws.run, "model_turn", {"group": group["id"], "turn": turn,
                 "thinking": thinking, "response": content, "metrics": counters})
             obj = parse(content)
+            validate_schema(obj, schema)
             if obj["kind"] == "assessment":
                 result = validate_assessment(obj, required, ws.evidence, allowed)
                 # A failed investigation cannot disappear through a clean model answer.

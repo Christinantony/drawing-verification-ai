@@ -58,8 +58,58 @@ PROTOCOL_SCHEMA = {"oneOf": [TOOLS, ASSESSMENT]}
 COLOR_SCHEMA = obj({"color": STRING})
 
 
-def review_schema(required_ids, final_turn=False):
+def source_quotes(text, size=240):
+    """Literal source options, not model-written or normalized quotations."""
+    import json
+    options = []
+    for line in text.splitlines():
+        line = line.strip()
+        for start in range(0, len(line), size):
+            options.append(line[start:start + size])
+    # Include short JSON values as convenient exact quote options. The full
+    # source text remains in the prompt and ledger, with its original format.
+    def leaves(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                leaves(item)
+        elif isinstance(value, list):
+            for item in value:
+                leaves(item)
+        elif isinstance(value, str):
+            if value and len(value) <= size:
+                options.append(value)
+    try:
+        leaves(json.loads(text))
+    except ValueError:
+        pass
+    return sorted({q for q in options if q.strip() and q in text})
+
+
+def review_schema(required_ids, final_turn=False, evidence=None, allowed=None):
     import copy
     assessment = copy.deepcopy(ASSESSMENT)
     assessment["properties"]["reviewed_ids"] = {"const": list(required_ids)}
+    if evidence is not None:
+        ids = sorted(allowed if allowed is not None else required_ids)
+        references = array({"type": "string", "enum": ids}, minItems=1, maxItems=50)
+        finding = assessment["properties"]["findings"]["items"]
+        finding["properties"]["evidence_ids"] = references
+        bases = ["text"]
+        kinds = {evidence[e]["kind"] for e in ids}
+        for basis, kind in (("requirement", "requirement"), ("calculation", "calculation"), ("visual", "image")):
+            if kind in kinds:
+                bases.append(basis)
+        finding["properties"]["basis"] = {"type": "string", "enum": bases}
+        quotes = [obj({"evidence_id": {"const": eid}, "text": {"type": "string", "enum": values}})
+                  for eid in ids if (values := source_quotes(evidence[eid]["text"]))]
+        if quotes:
+            finding["properties"]["quotes"] = array({"oneOf": quotes}, minItems=1)
+        else:
+            assessment["properties"]["findings"] = {"const": []}
+        assessment["properties"]["unresolved"]["items"]["properties"]["evidence_ids"] = references
+        documents = [e for e in ids if evidence[e]["kind"] == "document"]
+        if documents:
+            assessment["properties"]["entities"]["items"]["properties"]["evidence_id"] = {"enum": documents}
+        else:
+            assessment["properties"]["entities"] = {"const": []}
     return assessment if final_turn else {"oneOf": [TOOLS, assessment]}

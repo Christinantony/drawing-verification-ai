@@ -19,7 +19,7 @@ def chunks(text, size=4500):
 
 
 def runtime_versions():
-    names = ("pymupdf", "pytesseract", "opencv-python-headless", "python-docx", "openpyxl")
+    names = ("pymupdf", "pytesseract", "opencv-python-headless", "python-docx", "openpyxl", "jsonschema")
     out = {"python": platform.python_version()}
     for name in names:
         try:
