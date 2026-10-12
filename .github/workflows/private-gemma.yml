@@ -1,0 +1,73 @@
+name: Private drawing test with Gemma
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [supervisor-edition]
+    paths:
+      - 'private-test-inputs/**'
+      - '.github/workflows/private-gemma.yml'
+      - 'scripts/private_gemma_test.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-gemma-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: github.event.repository.private == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_MODELS: ${{ runner.temp }}/gemma-models
+      OLLAMA_NUM_PARALLEL: '1'
+      OLLAMA_MAX_LOADED_MODELS: '1'
+      OLLAMA_CONTEXT_LENGTH: '8192'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install extraction dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr libreoffice-writer zstd
+          python -m pip install -r requirements.txt
+      - name: Install pinned Ollama
+        run: |
+          mkdir -p "$RUNNER_TEMP/ollama-runtime" live-results
+          curl --fail --location --retry 3 https://github.com/ollama/ollama/releases/download/v0.40.3/ollama-linux-amd64.tar.zst | tar --zstd -xf - -C "$RUNNER_TEMP/ollama-runtime"
+          echo "$RUNNER_TEMP/ollama-runtime/bin" >> "$GITHUB_PATH"
+          free -m > live-results/runner-memory.txt
+          df -h > live-results/runner-disk.txt
+      - name: Start Ollama
+        run: |
+          nohup ollama serve > live-results/ollama.log 2>&1 &
+          echo $! > "$RUNNER_TEMP/ollama.pid"
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11434/api/version > live-results/ollama-version.json; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - name: Download Gemma E4B
+        timeout-minutes: 15
+        run: ollama pull gemma4:e4b
+      - name: Run supplied drawing set
+        timeout-minutes: 65
+        run: python scripts/private_gemma_test.py
+      - name: Stop model server
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/ollama.pid"; then kill "$(cat "$RUNNER_TEMP/ollama.pid")" || true; fi
+      - name: Save private reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-gemma-test-results
+          path: live-results/
+          retention-days: 3
+          if-no-files-found: warn
