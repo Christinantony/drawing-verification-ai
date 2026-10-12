@@ -1,5 +1,11 @@
 # Drawing Verification AI
 
+> **Supervisor Edition — experimental v0.1.0.** This branch is a separate edition.
+> Start with [SUPERVISOR_EDITION.md](SUPERVISOR_EDITION.md) for installation and the new CLI.
+> The existing readers and checks remain unchanged from commit `1255b86`.
+> Gemma supervises evidence review through bounded tools. Live Gemma accuracy has not yet been validated.
+> The baseline documentation below describes the original tools, which remain available.
+
 **Offline checking of engineering drawings and their inspection documents, with a locally run Gemma 4 E4B model.**
 
 Drawing review is slow, repetitive and easy to get wrong. Typical slips are a title-block scale that can't be right, a BOM line naming a drawing that isn't in the set, a `NEXT ASSY.` the parent never lists, or a checklist tolerance copied from the wrong row. This repository automates those first-pass checks, so a reviewer starts from a short list of suspected problems instead of a blank sheet.
