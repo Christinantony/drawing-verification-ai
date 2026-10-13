@@ -1,6 +1,6 @@
 # Drawing Verification AI — Supervisor Edition
 
-Experimental version: **0.1.0**. Branch: **supervisor-edition**.
+Experimental version: **0.2.0**. Branch: **supervisor-edition**.
 
 This edition starts from `1255b86e444c20a3da390d368cb63708ea6ad17d`.
 It preserves the source code in `sheetreader/`, `drawing-audit/`, `dimcheck/`, and `coherence/`.
@@ -34,6 +34,45 @@ Run `ollama serve` if Ollama is not already running.
 The exact `gemma4:e4b` model must be installed. Another `gemma4` variant does not satisfy the check.
 The model digest and Ollama version are recorded for each review.
 
+## Check what will be reviewed first
+
+```powershell
+python -m supervisor plan "C:\Drawings\Set-A" --output "C:\DrawingReviews\Supervisor"
+```
+
+`plan` reads every file and runs every rule, then stops before Gemma. It prints and saves (`plans/<run>.md`):
+
+- every file found, and whether it was read, unreadable, or not supported;
+- which sections will go to Gemma, and why each one is concerning;
+- which sections are skipped as not concerning, and why;
+- every warning.
+
+No model is used, so this takes only the reading time (seconds per text-layer PDF, under a minute per OCR sheet).
+
+### What is reviewed and what is skipped
+
+The decision is made by fixed, tested rules from the content that was read (`supervisor/triage.py`), not by Gemma. A Gemma call costs minutes on a CPU, and a decision made by fixed rules can be repeated and audited.
+
+| Content | Sent to Gemma when | Otherwise |
+|---|---|---|
+| Drawing sheet | A medium/high rule finding, a required title-block field not read, words not in the dictionary, or low-confidence OCR words | Skipped, warning "all rules passed …" |
+| Dimension checklist | A row disagrees with the drawing or could not be compared | Skipped, warning "every row matches the drawing" |
+| Checklist with no matching drawing | — | Skipped, warning `checklist_without_drawing` |
+| Link between two drawings | A cross-file rule raised a finding on that pair | Skipped, warning |
+| Other Word/Excel document | It names a drawing number in this set | Skipped, warning "does not name any drawing number in this set" |
+| Unsupported file (`.dwg`, `.step`, `.csv`, …) | — | Not read, warning `unsupported_file` with the reason |
+
+Other warnings (they do not make a review incomplete):
+
+- `reference_not_in_set`: a BOM line or `NEXT ASSY.` points to a drawing that is not in the folder.
+- `checklist_cell_empty`: the checklist cell is empty; the warning gives the drawing value.
+- `tolerance_assumed`: no tolerance is printed beside the dimension, so the general tolerance is assumed.
+- `excel_formulas`: the saved values were reviewed, not recalculated.
+
+**Incomplete** is now reserved for a planned check that could not run: an unreadable file, a checklist row that could not be compared, a checklist that matches several drawings, a model or tool failure, or a file changed during the review.
+
+Use `--all` with `plan` or `review` to send every section to Gemma, as in v0.1.0.
+
 ## Review a drawing set
 
 ```powershell
@@ -63,6 +102,7 @@ Missing evidence, unreadable input, unavailable Gemma, invalid model output, or 
 Model findings never delete baseline findings. Official approval remains an engineer action.
 
 Exit codes: `0` = complete/no issue; `1` = complete/issues found; `2` = incomplete; `3` = setup or fatal error.
+Warnings never change the exit code. Read them: a skipped link check is not a passed link check.
 Treat exit code 2 as a usable partial report, never as a clean review.
 
 ## Baseline comparison
@@ -81,7 +121,8 @@ The standard tools also remain available through their original commands.
 flowchart TD
     A[Source manifest] --> B[Existing extraction and rules]
     B --> C[SQLite evidence store]
-    C --> D[Gemma assessment]
+    C --> T[Triage: concerning, or skipped with a warning]
+    T --> D[Gemma assessment]
     D -->|Tool request| E[Python controller]
     E -->|New evidence| D
     D --> F[Schema and evidence checks]
@@ -93,6 +134,7 @@ flowchart TD
 3. Retain structured records, complete extracted text, raw word coordinates, and available OCR confidence.
 4. Run the original drawing rules, known spelling rules, cross-drawing checks, and checklist verification.
 5. Pack source sections into small review groups. Every source section receives an explicit coverage ID.
+   Triage then keeps only concerning groups for Gemma; every skipped group gets a warning with its reason.
 6. Give Gemma the evidence and a small typed tool catalogue.
 7. Execute validated requests. Keep new readings separate from the originals.
 8. Require a final structured assessment with exact source quotes and coverage IDs.

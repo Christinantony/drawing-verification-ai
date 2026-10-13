@@ -76,7 +76,9 @@ class Controller:
                   "coverage": "complete" if not unresolved and set(reviewed) == set(required) else "incomplete",
                   "issue_status": "issues_found" if any(f["severity"] != "info" for f in findings) else "no_issue_found",
                   "required_ids": required, "reviewed_ids": reviewed, "findings": findings,
-                  "unresolved": unresolved, "metrics": metrics, "supervisor_seconds": time.monotonic() - started,
+                  "unresolved": unresolved, "warnings": list(self.ws.warnings),
+                  "skipped": list(getattr(self.ws, "skipped", [])), "plan": getattr(self.ws, "plan", None),
+                  "metrics": metrics, "supervisor_seconds": time.monotonic() - started,
                   "scope": "Extracted text, drawing metadata, document relations, registered checks; visual regions only when requested.",
                   "not_verified": ["Complete geometric correctness", "Complete GD&T interpretation", "Manufacturing suitability", "Official drawing approval"]}
         self.ws.store.finish(self.ws.run, result)
