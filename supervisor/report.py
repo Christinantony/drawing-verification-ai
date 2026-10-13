@@ -13,26 +13,50 @@ def escape(value):
     return text.replace("\n", " ")
 
 
+def plan_lines(plan, warnings, incomplete=()):
+    """Inventory, what the supervisor reviewed and skipped, and warnings."""
+    lines = []
+    if plan:
+        lines += ["## Files and plan", "", "| File | Status |", "|---|---|"]
+        lines += [f"| {escape(name)} | {escape(state)} |" for name, state in sorted(plan["files"].items())]
+        lines += ["", f"Drawing sheets read: {plan['drawings']}. Checklists: {plan['checklists']}.", ""]
+        lines += [f"Reviewed by the supervisor ({len(plan['planned'])}):", ""]
+        lines += [f"- {escape(x['label'])}: {escape('; '.join(x['reasons']))}" for x in plan["planned"]] or ["- Nothing concerning."]
+        lines += ["", f"Skipped as not concerning ({len(plan['skipped'])}):", ""]
+        lines += [f"- {escape(x['label'])}: {escape(x['reason'])}" for x in plan["skipped"]] or ["- None."]
+        lines.append("")
+    lines += ["## Warnings", "", "Not checked, or checked with an assumption. Warnings do not make a review incomplete.", ""]
+    lines += [f"- **{escape(w['code'])}**: {escape(w['message'])}" for w in warnings] or ["- None."]
+    if incomplete:
+        lines += ["", "## Checks that could not run", ""]
+        lines += [f"- {escape(u['question'])}" for u in incomplete]
+    lines.append("")
+    return lines
+
+
 def write(workspace, result):
     folder = workspace.output / "runs" / workspace.run
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "report.json").write_text(dumps(result), encoding="utf-8")
     (folder / "evidence.json").write_text(dumps(list(workspace.evidence.values())), encoding="utf-8")
-    lines = ["# Drawing Verification AI — Supervisor Edition", "", "Experimental v0.1.0", "",
+    from . import __version__
+    lines = ["# Drawing Verification AI — Supervisor Edition", "", f"Experimental v{__version__}", "",
              f"Run: `{workspace.run}`", "", f"**Coverage: {result['coverage'].upper()}**", "",
              f"**Findings: {result['issue_status'].replace('_', ' ').upper()}**", "",
-             f"Supervisor coverage: {len(result['reviewed_ids'])}/{len(result['required_ids'])} evidence sections.", "",
+             f"Supervisor coverage: {len(result['reviewed_ids'])}/{len(result['required_ids'])} planned evidence sections; "
+             f"{len(result.get('skipped', []))} section group(s) skipped as not concerning; {len(result.get('warnings', []))} warning(s).", "",
              "A completed review is limited to the stated scope. It is not drawing approval.", "",
              "## Findings", ""]
     if not result["findings"]:
-        lines.append("No issue was found in the completed checks. See incomplete checks below.")
+        lines.append("No issue was found in the completed checks. See warnings and incomplete checks below.")
     for i, finding in enumerate(result["findings"], 1):
         lines += [f"### F{i}: {escape(finding['severity'].upper())} — {escape(finding['source'])}", "",
                   escape(finding["claim"]), "", "Action: " + escape(finding["action"]), "",
                   "Evidence: " + ", ".join(f"`{e}`" for e in finding["evidence_ids"]), ""]
         for quote in finding.get("quotes", []):
             lines += [f"Source `{quote['evidence_id']}`: {escape(quote['text'])}", ""]
-    lines += ["## Incomplete checks", ""]
+    lines += plan_lines(result.get("plan"), result.get("warnings", []))
+    lines += ["## Incomplete checks", "", "Planned checks that could not be completed. Any entry here makes coverage incomplete.", ""]
     lines += ["- " + escape(u["question"]) + " — " + ", ".join(f"`{e}`" for e in u["evidence_ids"])
               for u in result["unresolved"]] or ["None recorded."]
     lines += ["", "## Review scope", "", result["scope"], "", "Not verified:", ""]

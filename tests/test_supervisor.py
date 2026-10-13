@@ -303,7 +303,9 @@ def test_compact_package_keeps_all_text_and_allows_realistic_context(workspace):
     assert "file_hash" not in package["evidence"][0]
     assert workspace.evidence[eid]["file_hash"]
     assert result["supervisor_status"] == "completed"
-    assert result["coverage"] == "incomplete"  # Missing child evidence remains.
+    # The missing child drawing is a warning (input gap), not an incomplete check.
+    assert result["coverage"] == "complete"
+    assert any(w["code"] == "reference_not_in_set" for w in result["warnings"])
 
 
 def test_bad_file_still_appears_as_incomplete(tmp_path):
@@ -319,12 +321,15 @@ def test_bad_file_still_appears_as_incomplete(tmp_path):
         store.close()
 
 
-def test_missing_child_keeps_coverage_incomplete(workspace):
-    assert workspace.incomplete
+def test_missing_child_is_a_warning_not_an_incomplete_review(workspace):
+    assert not workspace.incomplete
+    warnings = [w for w in workspace.warnings if w["code"] == "reference_not_in_set"]
+    assert warnings and all("not in this folder" in w["message"] for w in warnings)
+    assert not any("not in this folder" in f["claim"] for f in workspace.baseline)
     result = Controller(workspace, FakeModel()).review()
     assert result["required_ids"] == result["reviewed_ids"]
-    assert result["coverage"] == "incomplete"
-    assert any("not in this folder" in u["question"] for u in result["unresolved"])
+    assert result["coverage"] == "complete"
+    assert result["warnings"] == workspace.warnings
 
 
 def test_packing_retains_all_source_sections(workspace):

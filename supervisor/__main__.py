@@ -26,17 +26,20 @@ def parser():
     p = argparse.ArgumentParser(description="Drawing Verification AI — Supervisor Edition (experimental)")
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="command", required=True)
-    for name in ("review", "doctor"):
+    for name in ("review", "plan", "doctor"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--model", default="gemma4:e4b")
         cmd.add_argument("--host", default="http://localhost:11434")
         cmd.add_argument("--seconds", type=positive, default=180, help="Model call / investigation time budget")
         cmd.add_argument("--context", type=positive, default=16384)
         cmd.add_argument("--vision", action="store_true")
-        if name == "review":
+        if name in ("review", "plan"):
             cmd.add_argument("input")
             cmd.add_argument("--output", default="supervisor-output")
             cmd.add_argument("--requirements", help="Approved local requirements JSON")
+            cmd.add_argument("--all", action="store_true",
+                             help="Send every section to the supervisor, not only concerning ones")
+        if name == "review":
             cmd.add_argument("--no-model", action="store_true", help="Baseline only; supervisor coverage remains incomplete")
             cmd.add_argument("--rounds", type=int, choices=range(0, 5), default=2)
             cmd.add_argument("--max-tokens", type=positive, default=1000)
@@ -92,6 +95,18 @@ def doctor(client, smoke=False, vision=False):
     return report
 
 
+def write_plan(ws, output):
+    from .store import dumps
+    from .report import plan_lines
+    folder = output / "plans"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{ws.run}.json").write_text(dumps({"plan": ws.plan, "warnings": ws.warnings,
+                                                    "incomplete": ws.incomplete}), encoding="utf-8")
+    path = folder / f"{ws.run}.md"
+    path.write_text("\n".join(["# Review plan", ""] + plan_lines(ws.plan, ws.warnings, ws.incomplete)), encoding="utf-8")
+    return path
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     client, store = None, None
@@ -107,6 +122,13 @@ def main(argv=None):
         store = Store(output / "evidence.sqlite3")
         ws = Workspace(source, store, output, args.requirements)
         ws.prepare()
+        from . import triage
+        triage.plan(ws, review_all=args.all)
+        print(triage.summary(ws, None if args.command == "plan" or args.no_model else args.seconds), flush=True)
+        if args.command == "plan":
+            path = write_plan(ws, output)
+            print(f"Plan written to {path}. No model was used.")
+            return 0
         if not args.no_model:
             client = Ollama(args.host, args.model, args.seconds, args.context)
         result = Controller(ws, client, args.rounds, args.seconds, args.vision,
