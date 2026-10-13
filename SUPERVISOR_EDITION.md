@@ -49,6 +49,21 @@ python -m supervisor plan "C:\Drawings\Set-A" --output "C:\DrawingReviews\Superv
 
 No model is used, so this takes only the reading time (seconds per text-layer PDF, under a minute per OCR sheet).
 
+### Checklists are completed, not only checked
+
+For each checklist matched to a drawing, the supervisor writes `runs/<run>/checklists/<name>_completed.docx`:
+
+- Only **empty tolerance cells** are filled, with the value read from the drawing. No rows or dimensions are added.
+- Existing values are never changed. A value that disagrees with the drawing is a high finding, and the cell keeps its value.
+- Inserted cells are shaded **yellow** when read from the drawing at high confidence (printed tolerance or general table).
+  They are shaded **orange** when the value is an assumed general tolerance or the dimension was found only near its zone; an engineer must confirm these.
+- A cell whose drawing value cannot be read stays empty. The checklist is reported as not complete, with the cells listed.
+- The source checklist is never written. A legacy `.doc` produces a `.docx` copy.
+- No copy is written when the checklist has no empty cells.
+
+The report has a **Checklists** table (rows, matched, inserted, to confirm, mismatch, still empty, complete) and the console prints one line per checklist.
+On a real 20-row checklist with all tolerances removed, all 20 inserted values equalled the values entered by QC.
+
 ### What is reviewed and what is skipped
 
 The decision is made by fixed, tested rules from the content that was read (`supervisor/triage.py`), not by Gemma. A Gemma call costs minutes on a CPU, and a decision made by fixed rules can be repeated and audited.
@@ -56,7 +71,7 @@ The decision is made by fixed, tested rules from the content that was read (`sup
 | Content | Sent to Gemma when | Otherwise |
 |---|---|---|
 | Drawing sheet | A medium/high rule finding, a required title-block field not read, words not in the dictionary, or low-confidence OCR words | Skipped, warning "all rules passed …" |
-| Dimension checklist | A row disagrees with the drawing or could not be compared | Skipped, warning "every row matches the drawing" |
+| Dimension checklist | A row disagrees with the drawing or could not be compared | Skipped, warning "every row matches the drawing or was filled from it" |
 | Checklist with no matching drawing | — | Skipped, warning `checklist_without_drawing` |
 | Link between two drawings | A cross-file rule raised a finding on that pair | Skipped, warning |
 | Other Word/Excel document | It names a drawing number in this set | Skipped, warning "does not name any drawing number in this set" |

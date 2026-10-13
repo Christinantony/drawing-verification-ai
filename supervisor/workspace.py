@@ -111,6 +111,8 @@ class Workspace:
         self.checklists = []
         # Per-checklist outcome for triage: unmatched | clean | concern
         self.checklist_status = {}
+        # Per-checklist fill result: counts, cells still empty, completed copy path
+        self.checklist_results = {}
         for name, reason in self.unsupported.items():
             self.warn("unsupported_file", f"Not reviewed: {name} ({reason}).")
 
@@ -315,7 +317,12 @@ class Workspace:
                                                    [flat], [pdfs[name]], run_dimcheck=False)
                 for issue in metadata:
                     self.baseline_finding(issue, cid + did)
-                rows = process(str(pdfs[name]), chk["path"], None)
+                # Fill empty tolerance cells in a copy in this run's folder. The
+                # source checklist is never written; rows are never added and
+                # existing values are never changed.
+                completed = self.output / "runs" / self.run / "checklists" / (Path(chk["_file"]).stem + "_completed.docx")
+                completed.parent.mkdir(parents=True, exist_ok=True)
+                rows = process(str(pdfs[name]), chk["path"], str(completed), mark_filled=True)
                 concern = bool(metadata)
                 rid = self.add_text("check_result", dumps([r.__dict__ for r in rows]),
                                     chk["_file"], location="dimcheck verify results")
@@ -330,16 +337,32 @@ class Workspace:
                     elif r.source == "unresolved" or r.verdict in ("kept", "not set"):
                         # The row could not be compared with the drawing.
                         concern = True
-                        self.issue(f"Checklist row could not be verified: {label}: {'; '.join(r.notes) or r.verdict}", cid + rid)
+                        what = ("tolerance cell left empty: the drawing value could not be read"
+                                if r.verdict == "not set" else "could not be compared with the drawing")
+                        self.issue(f"Checklist row {what}: {label}: {'; '.join(r.notes) or r.verdict}", cid + rid)
                     elif r.verdict == "filled":
-                        self.warn("checklist_cell_empty",
-                                  f"{label}: the checklist tolerance cell is empty; the drawing gives {r.resolved_tolerance} ({r.source}).", cid + rid)
+                        to_confirm = r.source not in ("explicit", "general_table") or r.confidence != "high"
+                        self.warn("tolerance_inserted_confirm" if to_confirm else "tolerance_inserted",
+                                  f"{label}: empty cell filled with {r.resolved_tolerance} from the drawing ({r.source}, "
+                                  f"{r.confidence} confidence)" + ("; confirm this value" if to_confirm else "") + ".", cid + rid)
                     elif r.source == "assumed":
                         self.warn("tolerance_assumed",
                                   f"{label}: no tolerance printed beside it; general tolerance {r.resolved_tolerance} assumed.", cid + rid)
                 self.checklist_status[chk["_file"]] = "concern" if concern else "clean"
-                self.checklist_rows = getattr(self, "checklist_rows", {})
-                self.checklist_rows[chk["_file"]] = {"rows": len(rows), "match": sum(r.verdict == "match" for r in rows), "drawing": name}
+                filled = [r for r in rows if r.verdict == "filled"]
+                empty = [f"{r.zone} {r.dimension}" for r in rows if r.verdict == "not set"]
+                mismatched = [f"{r.zone} {r.dimension}" for r in rows if r.verdict.startswith("MISMATCH")]
+                unverified = [f"{r.zone} {r.dimension}" for r in rows if r.verdict == "kept"]
+                if not filled:
+                    completed.unlink(missing_ok=True)
+                self.checklist_results[chk["_file"]] = {
+                    "drawing": name, "rows": len(rows), "matched": sum(r.verdict == "match" for r in rows),
+                    "inserted": len(filled),
+                    "inserted_to_confirm": sum(1 for r in filled if r.source not in ("explicit", "general_table") or r.confidence != "high"),
+                    "still_empty": empty, "mismatched": mismatched, "unverified": unverified,
+                    "complete": not empty,
+                    "completed_copy": str(completed) if filled else None}
+
             except Exception as exc:
                 self.checklist_status[chk["_file"]] = "concern"
                 self.issue(f"Checklist could not be verified: {chk['_file']}: {exc}", cid + did)

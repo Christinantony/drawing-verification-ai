@@ -34,6 +34,28 @@ def plan_lines(plan, warnings, incomplete=()):
     return lines
 
 
+def checklist_lines(results):
+    if not results:
+        return []
+    lines = ["## Checklists", "",
+             "Empty tolerance cells are filled in a copy; the source checklist is not changed. "
+             "No rows are added and existing values are never changed. "
+             "In the copy, yellow = read from the drawing; orange = assumed or found near its zone, confirm it.", "",
+             "| Checklist | Rows | Matched | Inserted | To confirm | Mismatch | Still empty | Complete | Completed copy |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for name, r in sorted(results.items()):
+        copy = escape(r["completed_copy"]) if r["completed_copy"] else "no empty cells"
+        lines.append(f"| {escape(name)} | {r['rows']} | {r['matched']} | {r['inserted']} | {r['inserted_to_confirm']} | "
+                     f"{len(r['mismatched'])} | {len(r['still_empty'])} | {'yes' if r['complete'] else 'NO'} | {copy} |")
+    for name, r in sorted(results.items()):
+        if r["still_empty"]:
+            lines.append(f"\n{escape(name)}: still empty: {escape(', '.join(r['still_empty']))}. Fill these by hand.")
+        if r["mismatched"]:
+            lines.append(f"\n{escape(name)}: values that disagree with the drawing (not changed): {escape(', '.join(r['mismatched']))}.")
+    lines.append("")
+    return lines
+
+
 def write(workspace, result):
     folder = workspace.output / "runs" / workspace.run
     folder.mkdir(parents=True, exist_ok=True)
@@ -55,6 +77,7 @@ def write(workspace, result):
                   "Evidence: " + ", ".join(f"`{e}`" for e in finding["evidence_ids"]), ""]
         for quote in finding.get("quotes", []):
             lines += [f"Source `{quote['evidence_id']}`: {escape(quote['text'])}", ""]
+    lines += checklist_lines(result.get("checklists") or {})
     lines += plan_lines(result.get("plan"), result.get("warnings", []))
     lines += ["## Incomplete checks", "", "Planned checks that could not be completed. Any entry here makes coverage incomplete.", ""]
     lines += ["- " + escape(u["question"]) + " — " + ", ".join(f"`{e}`" for e in u["evidence_ids"])

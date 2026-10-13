@@ -135,6 +135,10 @@ def main(argv=None):
                             args.max_tokens, args.thinking, args.reuse).review()
         report = write(ws, result)
         print(f"Report: {report}\nCoverage: {result['coverage']}; {result['issue_status']}")
+        for name, r in sorted(result.get("checklists", {}).items()):
+            state = "complete" if r["complete"] else f"{len(r['still_empty'])} cell(s) still empty"
+            copy = f" -> {r['completed_copy']}" if r["completed_copy"] else ""
+            print(f"Checklist {name}: {r['inserted']} tolerance(s) inserted, {state}{copy}")
         return 2 if result["coverage"] == "incomplete" else (1 if result["issue_status"] == "issues_found" else 0)
     except Exception as exc:
         print(f"Supervisor error: {exc}")

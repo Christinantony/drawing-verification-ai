@@ -77,6 +77,7 @@ class Controller:
                   "issue_status": "issues_found" if any(f["severity"] != "info" for f in findings) else "no_issue_found",
                   "required_ids": required, "reviewed_ids": reviewed, "findings": findings,
                   "unresolved": unresolved, "warnings": list(self.ws.warnings),
+                  "checklists": dict(getattr(self.ws, "checklist_results", {})),
                   "skipped": list(getattr(self.ws, "skipped", [])), "plan": getattr(self.ws, "plan", None),
                   "metrics": metrics, "supervisor_seconds": time.monotonic() - started,
                   "scope": "Extracted text, drawing metadata, document relations, registered checks; visual regions only when requested.",

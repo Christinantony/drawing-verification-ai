@@ -119,8 +119,8 @@ def classify(ws, group):
 SKIP_TEXT = {
     "drawing": "all rules passed, every required field read, no unknown or low-confidence words",
     "relationship": "the cross-file rules found no disagreement between these drawings",
-    "checklist": "every row matches the drawing",
-    "check_result": "every row matches the drawing",
+    "checklist": "every row matches the drawing or was filled from it",
+    "check_result": "every row matches the drawing or was filled from it",
     "document": "does not name any drawing number in this set",
 }
 
