@@ -162,7 +162,7 @@ def test_review_cli_writes_report_and_review_sheet(qcset, tmp_path):
     html = (run_dir / "report.html").read_text(encoding="utf-8")
     assert "Must fix before print" in html and "data:image/png;base64" in html
     rows = list(csv.reader(open(run_dir / "findings.csv", encoding="utf-8-sig")))
-    assert rows[0][10].startswith("your_verdict") and len(rows) > 5
+    assert any(h.startswith("your_verdict") for h in rows[0]) and "rule_said" in rows[0] and len(rows) > 5
     data = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
     assert {f["check"] for f in data["findings"]} >= {"C1", "C3", "A2"}
 
@@ -170,3 +170,132 @@ def test_review_cli_writes_report_and_review_sheet(qcset, tmp_path):
 def test_review_cli_reports_missing_model(qcset, tmp_path):
     folder, _, _ = qcset
     assert main(["review", str(folder), "--out", str(tmp_path / "o"), "--host", "http://127.0.0.1:9"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Model-driven steps: decisions under the QC policy, open review, layout
+# judge, drafted summary, verdict examples (fake model; no Ollama needed)
+# ---------------------------------------------------------------------------
+from qc.decide import decide, draft_summary, load_examples, load_policy, open_review  # noqa: E402
+from qc.layout import judge_layout  # noqa: E402
+
+
+class PolicyModel(FakeModel):
+    def __init__(self):
+        super().__init__()
+        self.prompts = []
+
+    def ask(self, system, user, schema, images=None, max_tokens=300):
+        self.calls += 1
+        self.prompts.append(user)
+        props = schema["properties"]
+        if "decisions" in props:
+            import re as _re
+            n = sum(1 for line in user.splitlines() if _re.match(r"\d+\. \[", line))
+            # drop the first fact, re-word the second, leave the rest unanswered
+            out = [{"n": 1, "decision": "drop", "wording": "", "reason": "standard part"}]
+            if n > 1:
+                out.append({"n": 2, "decision": "look", "wording": "Reworded by the model.", "reason": "minor"})
+            return {"decisions": out}
+        if "observations" in props:
+            return {"observations": [
+                {"quote": "FINAL ASSEMBLY", "problem": "Title is too generic for this product.", "severity": "look"},
+                {"quote": "THIS TEXT IS NOT ON THE SHEET", "problem": "invented", "severity": "must"}]}
+        if "overall" in props:
+            return {"overall": "Fix the drawing numbers first.",
+                    "sheets": [{"drawing": "AB-CD 10-E-01", "summary": "Two references are written wrongly."},
+                               {"drawing": "NOT-A-DRAWING", "summary": "dropped"}]}
+        if "missing" in props:
+            boxes = [{"n": i, "kind": "annotation"} for i in range(1, 40)]
+            return {"boxes": boxes, "missing": [{"kind": "notes", "area": "bottom-left", "hint": "notes"}]}
+        return super().ask(system, user, schema, images, max_tokens)
+
+
+def test_policy_is_plain_text_and_loaded():
+    p = load_policy(None)
+    assert "Severity" in p and "standard or bought-out part" in p
+
+
+def test_model_decides_under_policy_and_nothing_vanishes(qcset):
+    _, sheets, smap = qcset
+    fs = run_all(sheets, smap, config.load())
+    asm = [f for f in fs if f.status == "fail" and f.sheet is not None and f.sheet.number == "AB-CD 10-E-01"]
+    m = PolicyModel()
+    decide(fs, sheets, m, load_policy(None), [], config.load(), lambda *_: None)
+    assert "QC POLICY" in m.prompts[0] and "standard or bought-out part" in m.prompts[0]
+    dropped = [f for f in asm if f.status == "dropped"]
+    assert dropped and dropped[0].drop_reason == "standard part"
+    reworded = [f for f in asm if f.message == "Reworded by the model."]
+    assert reworded and reworded[0].severity == "look" and reworded[0].rule_message
+    # facts the model did not answer keep the rule decision, and say so
+    untouched = [f for f in asm if f.status == "fail" and "rule default" in " ".join(f.history)]
+    assert untouched
+
+
+def test_open_review_keeps_only_quotes_on_the_sheet(qcset):
+    _, sheets, _ = qcset
+    asm = [s for s in sheets if s.number == "AB-CD 10-E-01"]
+    obs = open_review(asm, [], PolicyModel(), load_policy(None), [], lambda *_: None)
+    assert [o.quote for o in obs] == ["FINAL ASSEMBLY"] and obs[0].code == "M1"
+
+
+def test_drafted_summary_only_names_real_drawings(qcset):
+    _, sheets, smap = qcset
+    fs = run_all(sheets, smap, config.load())
+    sm = draft_summary(sheets, fs, PolicyModel(), lambda *_: None)
+    assert sm["overall"].startswith("Fix") and [x["drawing"] for x in sm["sheets"]] == ["AB-CD 10-E-01"]
+
+
+def test_layout_judge_relabels_and_adds_from_free_words(tmp_path):
+    import pymupdf
+    from make_qc_set import make_part
+    pdf = tmp_path / "AB-CD 10-E-05 REV.00.pdf"
+    make_part(str(pdf), "AB-CD 10-E-05", "SPACER")
+    doc = pymupdf.open(str(pdf))
+    page = doc[0]
+    # a second, unheaded notes-like block at bottom-left the code can't place
+    page.insert_text((40, 520), "BONDING INSTRUCTIONS FOR THE SPACER", fontsize=7)
+    page.insert_text((40, 530), "CLEAN WITH ISOPROPYL ALCOHOL BEFORE BONDING", fontsize=7)
+    page.insert_text((300, 200), "SMOOTH SURFACE", fontsize=7)
+    doc.saveIncr()
+    doc.close()
+    q = read_pdf(pdf)[0]
+    before = [b.kind for b in q.blocks]
+    judge_layout([q], PolicyModel(), lambda *_: None)
+    after = [b.kind for b in q.blocks]
+    assert "unplaced" in before and after.count("unplaced") < before.count("unplaced")
+    assert q.layout["changes"]
+
+
+def test_examples_from_earlier_verdicts(tmp_path):
+    p = tmp_path / "findings.csv"
+    p.write_text("id,check_name,text,finding,your_verdict (real / false / dont care),your_comment\n"
+                 "Q001,Unknown word,KAPTON,'KAPTON' not in dictionary,false,trade name\n"
+                 "Q002,Reference,E-9B,written as E-9B,real,\n"
+                 "Q003,Reference,X,unmarked,,\n", encoding="utf-8-sig")
+    ex = load_examples([p])
+    assert [e["verdict"] for e in ex] == ["false", "real"] and ex[0]["comment"] == "trade name"
+
+
+def test_full_review_with_fake_model(qcset, tmp_path, monkeypatch):
+    import qc.model as qm
+    folder, _, _ = qcset
+
+    class Fake(PolicyModel):
+        def __init__(self, *a, **k):
+            super().__init__()
+            self.name = "fake-model"
+            self.metrics = []
+
+        def installed(self):
+            return ["fake-model"]
+
+    monkeypatch.setattr(qm, "Client", Fake)
+    out = tmp_path / "out"
+    code = main(["review", str(folder), "--out", str(out), "--model", "fake-model"])
+    assert code in (0, 1)
+    run_dir = Path((out / "latest.txt").read_text(encoding="utf-8")).parent
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    assert "Review summary" in html and "Dropped by the model" in html and "model + QC policy" in html
+    rows = list(csv.DictReader(open(run_dir / "findings.csv", encoding="utf-8-sig")))
+    assert any(r["group"] == "dropped" and r["model_said"].startswith("drop") for r in rows)

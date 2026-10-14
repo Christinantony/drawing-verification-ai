@@ -47,6 +47,17 @@ def _crop_b64(f, max_w=640):
         return None
 
 
+def _summary_html(summary, e):
+    if not summary or not summary.get("overall"):
+        return ""
+    out = [f"<div class='card'><b>Review summary</b> <span class='pill'>written by the model</span>"
+           f"<p>{e(summary['overall'])}</p>"]
+    if summary.get("sheets"):
+        out.append("<ul>" + "".join(f"<li><b>{e(x['drawing'])}</b>: {e(x['summary'])}</li>" for x in summary["sheets"]) + "</ul>")
+    out.append("</div>")
+    return "".join(out)
+
+
 def _bucket(f):
     if f.status in ("check", "doubt"):
         return "check"
@@ -58,19 +69,25 @@ def _bucket(f):
 def write(out_dir: Path, run: dict, sheets, smap, findings, checklists) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     items = [f for f in findings if _bucket(f)]
+    dropped = [f for f in findings if f.status == "dropped"]
     order = {"must": 0, "look": 1, "check": 2}
     items.sort(key=lambda f: (order[_bucket(f)], f.sheet.number if f.sheet else "", f.code))
-    for i, f in enumerate(items, 1):
+    for i, f in enumerate(items + dropped, 1):
         f.id = f"Q{i:03d}"
 
     # CSV + JSON (the review loop)
     with open(out_dir / "findings.csv", "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(["id", "group", "check", "check_name", "drawing", "file", "where", "text", "finding", "history",
+        w.writerow(["id", "group", "check", "check_name", "drawing", "file", "where", "text", "finding",
+                    "rule_said", "model_said", "history",
                     "your_verdict (real / false / dont care)", "your_comment"])
-        for f in items:
-            w.writerow([f.id, _bucket(f), f.code, f.name, f.sheet.number if f.sheet else "", f.sheet.file if f.sheet else "",
-                        f.where, f.quote, f.message, " | ".join(f.history), "", ""])
+        for f in items + dropped:
+            rule = getattr(f, "rule_severity", f.severity) if f.code != "M1" else "-"
+            model = ("drop: " + getattr(f, "drop_reason", "")) if f.status == "dropped" else \
+                (f.severity if hasattr(f, "rule_severity") or f.code == "M1" else "")
+            w.writerow([f.id, _bucket(f) or "dropped", f.code, f.name, f.sheet.number if f.sheet else "",
+                        f.sheet.file if f.sheet else "", f.where, f.quote, f.message, rule, model,
+                        " | ".join(f.history), "", ""])
     data = {"run": run, "findings": [{"id": f.id, "group": _bucket(f), "check": f.code, "name": f.name,
                                       "drawing": f.sheet.number if f.sheet else None,
                                       "file": f.sheet.file if f.sheet else None, "where": f.where, "text": f.quote,
@@ -93,7 +110,9 @@ table{{border-collapse:collapse;font-size:13px}} td,th{{border:1px solid #ddd;pa
 <h1>Drawing QC report</h1>
 <p class="meta">{e(run['folder'])} &middot; {run['started']} &middot; {len(sheets)} sheet(s) &middot; model: {e(run['model'])}
 {(' &middot; ' + e(run['speed'])) if run.get('speed') else ''} &middot; {run['seconds']} s</p>
-<p><b>{counts['must']}</b> must fix &middot; <b>{counts['look']}</b> please look &middot; <b>{counts['check']}</b> check by hand</p>
+<p><b>{counts['must']}</b> must fix &middot; <b>{counts['look']}</b> please look &middot; <b>{counts['check']}</b> check by hand
+&middot; decisions: {e(run.get('decisions', 'rules'))}{f" &middot; {len(dropped)} dropped by the model" if dropped else ""}</p>
+{_summary_html(run.get('summary') or {}, e)}
 <p class="meta">A first-pass check of the literal parts of the drawings (title block, BOM, notes, references, callouts).
 It does not check geometry or views. Every item needs an engineer's decision; record yours in findings.csv.</p>"""]
     for key, title in SECTIONS:
@@ -115,6 +134,29 @@ It does not check geometry or views. Every item needs an engineer's decision; re
                          f"<div class='meta'>{e(f.sheet.file) if f.sheet else ''}{' &middot; ' + e(f.where) if f.where else ''}{rel}</div>"
                          + (f"<div class='meta'>Doubt loop: {e(' → '.join(f.history))}</div>" if f.history else "")
                          + (f"<img src='data:image/png;base64,{img}'>" if img else "") + "</div>")
+
+    # Dropped by the model
+    if dropped:
+        h.append(f"<h2>Dropped by the model ({len(dropped)})</h2><p class='meta'>Facts the rules found that the model "
+                 "decided not to report under the QC policy, with its reason. Mark them in findings.csv too: a wrong "
+                 "drop is the most important thing to correct.</p><ul>")
+        for f in dropped:
+            h.append(f"<li><b>{f.id}</b> {e(f.sheet.number if f.sheet else 'set')} - {f.code}: "
+                     f"{e(getattr(f, 'rule_message', f.message))} <span class='meta'>(reason: {e(getattr(f, 'drop_reason', ''))})</span></li>")
+        h.append("</ul>")
+
+    # Layout check
+    lay = [(q, getattr(q, "layout", None)) for q in sheets]
+    lay = [(q, L) for q, L in lay if L and (L["changes"] or L["added"] or L["disagree"])]
+    if lay:
+        h.append("<h2>Layout check by the model</h2><p class='meta'>The model looked at each sheet with the "
+                 "program's boxes numbered on it. Re-labelled and added blocks were used in the checks; "
+                 "disagreements about the title block or BOM are only reported.</p>")
+        for q, L in lay:
+            h.append(f"<h3>{e(q.number or q.file)}</h3><ul>"
+                     + "".join(f"<li>re-labelled: {e(x)}</li>" for x in L["changes"])
+                     + "".join(f"<li>added: {e(x)}</li>" for x in L["added"])
+                     + "".join(f"<li>disagrees: {e(x)}</li>" for x in L["disagree"]) + "</ul>")
 
     # Text not placed
     h.append("<h2>Text not placed in a region</h2><p class='meta'>Literal text the agent could not sort into a "
@@ -172,7 +214,11 @@ It does not check geometry or views. Every item needs an engineer's decision; re
             h.append(f"<li>{e(s.number)}: balloons vs BOM not checked (scanned sheet).</li>")
     for n in run.get("unsupported", []):
         h.append(f"<li>{e(n)}: file type not supported - export drawings as PDF.</li>")
-    h.append("<li>Geometry, views, dimensions and GD&amp;T are outside this check.</li></ul></body></html>")
+    h.append("<li>Geometry, views, dimensions and GD&amp;T are outside this check.</li></ul>")
+    t = {k: v for k, v in (run.get("timing") or {}).items() if isinstance(v, float)}
+    if t:
+        h.append("<h2>Time per step</h2><p class='meta'>" + " &middot; ".join(f"{e(k)}: {v} s" for k, v in t.items()) + "</p>")
+    h.append("</body></html>")
     path = out_dir / "report.html"
     path.write_text("\n".join(h), encoding="utf-8")
     return path

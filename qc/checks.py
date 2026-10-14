@@ -39,7 +39,7 @@ CHECK_NAMES = {
     "C4": "Note fits its item", "C5": "SEE NOTE / TABLE / DETAIL target", "C6": "USE FILE names this drawing",
     "C7": "Jig, mould and template numbers", "C8": "Checklist vs drawing",
     "D1": "Note numbering", "D2": "Note vs title block", "D3": "Same note worded differently",
-    "D4": "Note complete and clear", "D5": "Legend and symbol",
+    "D4": "Note complete and clear", "D5": "Legend and symbol", "M1": "Model observation",
     "E1": "General tolerances across the set", "E2": "Dates across the set",
 }
 
@@ -118,7 +118,7 @@ def text_lines(sheet) -> List[tuple]:
     for i, n in enumerate(sheet.notes, 1):
         out.append((f"note {n.number or i}", n.text, n.bbox))
     for b in sheet.blocks:
-        if b.kind in ("view_label", "legend", "unplaced", "callout"):
+        if b.kind in ("view_label", "legend", "unplaced", "callout", "table", "annotation"):
             for l in b.lines:
                 out.append((b.kind.replace("_", " "), l.text, l.bbox))
     return out

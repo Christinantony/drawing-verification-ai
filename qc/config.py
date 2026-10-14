@@ -16,7 +16,13 @@ DEFAULTS = {
         "vision": True,          # may read an image of a single text box (never the views)
         "doubt_passes": 2,
     },
-    # must = must fix before print; look = please look.
+    # Model steps (all on by default; --skip or --decide rules turn them off)
+    "model_steps": {"layout": True, "judge": True, "doubt": True, "decide": True, "open_review": True,
+                    "summary": True},
+    "policy_file": None,       # None = qc/policy.md
+    "examples": [],            # findings.csv files with your verdicts
+    # must = must fix before print; look = please look (the rules' default;
+    # with model decisions these are only the starting point).
     "severity": {
         "A1": "must", "A2_missing_balloon": "look", "A2_extra_balloon": "must", "A3": "look", "A4": "look",
         "A5": "must", "A6": "must",

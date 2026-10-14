@@ -297,26 +297,61 @@ def _notes(q: QCSheet, taken) -> None:
         block = Block("notes", union([h.bbox] + [l.bbox for l in kept]), kept,
                       {"heading": h.text, "is_notes": bool(NOTE_HEAD.match(h.text))})
         q.blocks.append(block)
-        # Split into notes: a numbered or bulleted line starts a new note,
-        # anything else continues the previous one.
-        cur: Optional[Note] = None
-        for l in sorted(kept, key=lambda l: (l.bbox[1], l.bbox[0])):
-            t = l.text.strip()
-            m = NOTE_NUM.match(t)
-            b = BULLET.match(t)
-            if m and m.group(2):
-                cur = Note(m.group(1), m.group(2).strip(), l.bbox, bi, l.conf)
-                q.notes.append(cur)
-            elif b:
-                cur = Note(None, b.group(1).strip(), l.bbox, bi, l.conf)
-                q.notes.append(cur)
-            elif cur is not None and l.bbox[1] - cur.bbox[3] < 1.6 * lh:
-                cur.text = (cur.text + " " + t).strip()
-                cur.bbox = union([cur.bbox, l.bbox])
-                cur.conf = min(cur.conf, l.conf)
-            else:
-                cur = Note(None, t, l.bbox, bi, l.conf)
-                q.notes.append(cur)
+        split_notes(q, kept, bi, lh)
+
+
+def split_notes(q: QCSheet, lines: List[Line], block_index: int, lh: float) -> None:
+    """Lines of a notes block -> Note objects: a numbered or bulleted line
+    starts a new note, anything else continues the previous one."""
+    cur: Optional[Note] = None
+    for l in sorted(lines, key=lambda l: (l.bbox[1], l.bbox[0])):
+        t = l.text.strip()
+        m = NOTE_NUM.match(t)
+        b = BULLET.match(t)
+        if m and m.group(2):
+            cur = Note(m.group(1), m.group(2).strip(), l.bbox, block_index, l.conf)
+            q.notes.append(cur)
+        elif b:
+            cur = Note(None, b.group(1).strip(), l.bbox, block_index, l.conf)
+            q.notes.append(cur)
+        elif cur is not None and l.bbox[1] - cur.bbox[3] < 1.6 * lh:
+            cur.text = (cur.text + " " + t).strip()
+            cur.bbox = union([cur.bbox, l.bbox])
+            cur.conf = min(cur.conf, l.conf)
+        else:
+            cur = Note(None, t, l.bbox, block_index, l.conf)
+            q.notes.append(cur)
+
+
+def taken_boxes(q: QCSheet) -> List[BBox]:
+    return [b.bbox for b in q.blocks if b.kind != "unplaced"]
+
+
+def add_block(q: QCSheet, area: BBox, kind: str, source: str = "layout judge") -> Optional[Block]:
+    """Make a block from the free words inside `area` (used when the layout
+    judge reports an element the code did not box). Words already in a
+    block are left where they are."""
+    busy = taken_boxes(q)
+    words = [w for w in q.sheet.words if inside(w, area) and inside(w, q.frame)
+             and not any(inside(w, b, 1.0) for b in busy)]
+    if not words:
+        return None
+    lines = [l for l in _lines(words, gap_factor=6.0)
+             if any(len(re.sub(r"[^A-Za-z0-9]", "", w.text)) >= 2 for w in l.words)]
+    if not lines:
+        return None
+    box = union(l.bbox for l in lines)
+    # free the same words from any 'unplaced' block they were in
+    for b in q.blocks_of("unplaced"):
+        b.lines = [l for l in b.lines if not any(inside(w, box, 0.5) for w in l.words)]
+    q.blocks = [b for b in q.blocks if b.kind != "unplaced" or b.lines]
+    blk = Block(kind, box, lines, {"source": source, "is_notes": kind == "notes"})
+    q.blocks.append(blk)
+    if kind == "notes":
+        bi = 1 + max([n.block for n in q.notes], default=-1)
+        lh = sorted(l.bbox[3] - l.bbox[1] for l in lines)[len(lines) // 2]
+        split_notes(q, lines, bi, max(4.0, lh))
+    return blk
 
 
 def _ring_score(img: np.ndarray, k: float, cx: float, cy: float, r_pt: float) -> float:

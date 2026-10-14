@@ -233,7 +233,7 @@ class SetMap:
             for i, n in enumerate(s.notes, 1):
                 self._add(s, n.text, f"note {n.number or i}", n.bbox)
             for b in s.blocks:
-                if b.kind in ("view_label", "callout", "legend", "unplaced") or (b.kind == "notes" and not b.meta.get("is_notes")):
+                if b.kind in ("view_label", "callout", "legend", "unplaced", "table", "annotation") or (b.kind == "notes" and not b.meta.get("is_notes")):
                     if b.kind == "notes":
                         continue  # its lines are already in s.notes
                     for l in b.lines:

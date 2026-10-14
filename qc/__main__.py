@@ -136,14 +136,31 @@ def review(args) -> int:
             return 3
         log(f"Model: {m['name']} ({'can' if client.vision else 'cannot'} read images)")
 
-    log("1/7 Intake")
+    steps = dict(cfg.get("model_steps", {}))
+    if args.decide == "rules":
+        steps.update(decide=False, open_review=False, summary=False)
+    for name in (args.skip or "").split(","):
+        if name.strip():
+            steps[name.strip()] = False
+    if args.no_model:
+        steps = {k: False for k in steps}
+    timing = {}
+
+    def step(name):
+        timing[name] = time.monotonic()
+
+    def done(name):
+        timing[name] = round(time.monotonic() - timing[name], 1)
+
+    log("1/8 Intake")
     pdfs, docs, unsupported = intake(folder)
     log(f"    {len(pdfs)} PDF(s), {len(docs)} Word file(s)" + (f", {len(unsupported)} not supported: {', '.join(unsupported)}" if unsupported else ""))
     if not pdfs:
         log("No PDF drawings in the folder.")
         return 3
 
-    log("2/7 Read sheets   3/7 Locate parts")
+    log("2/8 Read sheets, 3/8 locate the parts")
+    step("read")
     sheets = []
     for p in pdfs:
         t = time.monotonic()
@@ -154,12 +171,22 @@ def review(args) -> int:
             continue
         sheets += got
         log(f"    {p.name}: {'OCR' if got and got[0].ocr else 'text layer'}, {len(got)} sheet(s), {time.monotonic() - t:.0f} s")
+    done("read")
+    if steps.get("layout") and getattr(client, "vision", False):
+        from .layout import judge_layout
+        log("    layout check by the model (numbered boxes)...")
+        step("layout")
+        judge_layout(sheets, client, log)
+        done("layout")
+        n_changes = sum(len(q.layout["changes"]) + len(q.layout["added"]) for q in sheets)
+        log(f"    layout check: {n_changes} change(s), {sum(len(q.layout['disagree']) for q in sheets)} disagreement(s) reported")
 
-    log("4/7 Map the set")
+    log("4/8 Map the set")
     smap = SetMap(sheets)
     log(f"    numbering {smap.describe()}; {len(smap.refs)} references")
 
-    log("5/7 QC checks")
+    log("5/8 QC checks (facts)")
+    step("checks")
     findings = run_all(sheets, smap, cfg)
     chk_results, chk_findings = run_checklists(docs, sheets, out_dir, cfg)
     findings += chk_findings
@@ -167,21 +194,52 @@ def review(args) -> int:
         log(f"    checklist {c['file']}: " + (f"{c.get('rows')} rows vs {c['drawing']} - {c.get('match', 0)} match, "
                                              f"{c.get('mismatch', 0)} mismatch, {c.get('filled', 0)} filled, {c.get('empty', 0)} left empty"
                                              if c.get("drawing") else "no matching drawing"))
+    done("checks")
     asks = sum(f.status == "ask" for f in findings)
     if asks:
-        log(f"    {asks} judgement question(s) for the model" + (" - skipped (--no-model)" if args.no_model else ""))
-    judge(findings, client, log)
+        log(f"    {asks} judgement question(s) for the model" + ("" if steps.get("judge") else " - skipped"))
+    step("judge")
+    judge(findings, client if steps.get("judge") else NoModel(), log)
+    done("judge")
 
-    log("6/7 Doubt loop")
+    log("6/8 Doubt loop")
+    step("doubt")
     n = sum(f.status == "doubt" for f in findings)
-    doubt_run(findings, sheets, smap, client, cfg, log)
+    doubt_run(findings, sheets, smap, client if steps.get("doubt") else NoModel(), cfg, log)
+    done("doubt")
     log(f"    {n} doubtful item(s): {sum(f.status == 'cleared' for f in findings if f.history)} cleared, "
         f"{sum(f.status == 'check' for f in findings)} left for you")
 
-    log("7/7 Report")
+    summary = {}
+    if steps.get("decide") or steps.get("open_review"):
+        from .decide import decide, draft_summary, load_examples, load_policy, open_review
+        policy = load_policy(args.policy or cfg.get("policy_file"))
+        examples = load_examples(args.examples or cfg.get("examples", []))
+        log(f"7/8 Model decisions under the QC policy" + (f" ({len(examples)} earlier verdicts as examples)" if examples else ""))
+        if steps.get("decide"):
+            step("decide")
+            decide(findings, sheets, client, policy, examples, cfg, log)
+            done("decide")
+            log(f"    {sum(f.status == 'dropped' for f in findings)} fact(s) dropped by the model (listed in the report)")
+        if steps.get("open_review"):
+            step("open_review")
+            extra = open_review(sheets, findings, client, policy, examples, log)
+            findings += extra
+            done("open_review")
+            log(f"    open review: {len(extra)} model observation(s)")
+        if steps.get("summary"):
+            step("summary")
+            summary = draft_summary(sheets, findings, client, log)
+            done("summary")
+    else:
+        log("7/8 Decisions: rules (no model decisions)")
+
+    log("8/8 Report")
     sp = client.speed()
     run = {"folder": str(folder), "started": started, "model": client.name, "version": __version__,
-           "seconds": round(time.monotonic() - t0), "unsupported": unsupported,
+           "seconds": round(time.monotonic() - t0), "unsupported": unsupported, "timing": timing,
+           "decisions": "model + QC policy" if steps.get("decide") else "rules",
+           "summary": summary,
            "speed": (f"{sp['calls']} model calls, {sp.get('output_tok_s')} tok/s out, {sp.get('prompt_tok_s')} tok/s in"
                      if sp.get("calls") else "")}
     path = write(out_dir, run, sheets, smap, findings, chk_results)
@@ -191,6 +249,8 @@ def review(args) -> int:
     look = sum(f.status == "fail" and f.severity == "look" for f in findings)
     check = sum(f.status in ("check", "doubt") for f in findings)
     log(f"\n{must} must fix, {look} please look, {check} check by hand  ({run['seconds']} s)")
+    if timing:
+        log("    time: " + ", ".join(f"{k} {v} s" for k, v in timing.items() if isinstance(v, float)))
     log(f"Report: {path}")
     return 1 if must else 0
 
@@ -284,13 +344,45 @@ def main(argv=None) -> int:
     r.add_argument("--host")
     r.add_argument("--no-model", action="store_true", help="rules and OCR only, no model")
     r.add_argument("--config", help="JSON file with your settings (see qc/qc_config.example.json)")
+    r.add_argument("--decide", choices=("model", "rules"), default="model",
+                   help="who decides what to report: the model under qc/policy.md (default) or the rules")
+    r.add_argument("--policy", help="your QC policy document (default qc/policy.md)")
+    r.add_argument("--examples", nargs="*", help="findings.csv files with your verdicts, used as examples")
+    r.add_argument("--skip", help="model steps to skip, comma separated: layout,judge,doubt,decide,open_review,summary")
     d = sub.add_parser("doctor", help="check the setup: packages, Tesseract, Ollama, the model")
     d.add_argument("--model")
     d.add_argument("--host")
     d.add_argument("--config")
     d.add_argument("--quick", action="store_true", help="skip the test calls")
+    lt = sub.add_parser("layout-test", help="one sheet: model draws its own boxes vs judges the program's boxes")
+    lt.add_argument("pdf")
+    lt.add_argument("--out", default="qc-output")
+    lt.add_argument("--model")
+    lt.add_argument("--host")
+    lt.add_argument("--config")
     a = p.parse_args(argv)
+    if a.command == "layout-test":
+        return layout_test_cmd(a)
     return review(a) if a.command == "review" else doctor(a)
+
+
+def layout_test_cmd(args) -> int:
+    from .layout import layout_test
+    from .model import Client
+    cfg = qc_config.load(args.config)
+    m = cfg["model"]
+    c = Client(args.model or m["name"], args.host or m["host"], m["context"], m["seconds_per_call"])
+    try:
+        c.installed()
+    except Exception as e:
+        log(f"Cannot reach Ollama ({e}).")
+        return 3
+    if not c.vision:
+        log(f"Model {c.name} cannot read images; the layout test needs one that can.")
+        return 3
+    path = layout_test(args.pdf, Path(args.out), c, log)
+    log(f"Layout test: {path}")
+    return 0
 
 
 if __name__ == "__main__":
