@@ -126,7 +126,9 @@ def _find_region(cells: Sequence[Cell], sheet: Sheet, pats):
     # block's bottom edge; a single character is never a title-block field.
     lower = [c for c in cells if c.yc > sheet.height * 0.55
              and c.width < sheet.width * 0.45 and c.height < sheet.height * 0.12
-             and len(re.sub(r"\s", "", c.text)) > 1]
+             and len(re.sub(r"[^A-Za-z0-9]", "", c.text)) > 1   # not just bullets / a zone letter
+             # A notes block drawn next to the title block is not part of it.
+             and not re.match(r"\s*NOTES?\s*:", c.text, re.I)]
     # A box that encloses other cells is a container (a view's frame zone
     # holding "DETAIL A / SCALE 2 : 5"), not a title-block field.
     lower = [c for c in lower if not any(

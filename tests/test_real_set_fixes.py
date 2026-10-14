@@ -157,11 +157,11 @@ def test_drawing_with_odd_general_tolerances_is_flagged_against_the_set():
 
 
 def test_ocr_number_with_one_stray_character_is_corrected():
-    parent = _dwg("XY-KD 200-E-05", "SHELL", bom=[{"item_no": "3", "description": "BLOCK", "ref": "VI-KD 2l00-E-08"}])
+    parent = _dwg("XY-KD 200-E-05", "SHELL", bom=[{"item_no": "3", "description": "BLOCK", "ref": "XI-KD 2l00-E-08"}])
     parent["_ocr"] = True
-    block = _dwg("VT-KD 200-E-08", "BLOCK", "XY-KD 200-E-05")
-    parent["drawing_no"] = "VT-KD 200-E-05"
-    block["next_assy"] = "VT-KD 200-E-05"
+    block = _dwg("XT-KD 200-E-08", "BLOCK", "XY-KD 200-E-05")
+    parent["drawing_no"] = "XT-KD 200-E-05"
+    block["next_assy"] = "XT-KD 200-E-05"
     assert check_drawings([parent, block]) == []
 
 

@@ -90,9 +90,17 @@ def read_drawing(path, force_ocr: bool = False, vertical_text: bool = True,
                  labels: Optional[dict] = None) -> List[DrawingRecord]:
     path = str(path)
     sheets = load_sheets(path, force_ocr=force_ocr, vertical_text=vertical_text)
+    return [read_sheet(sh, path, len(sheets), form_id_re=form_id_re, labels=labels)[0] for sh in sheets]
+
+
+def read_sheet(sh: Sheet, path, page_count: int = 1, form_id_re: str = DEFAULT_FORM_ID_RE,
+               labels: Optional[dict] = None):
+    """One loaded sheet -> (DrawingRecord, parts). `parts` keeps what the
+    record flattens away (cells, title block, table objects) for callers that
+    need positions, such as the QC agent."""
+    path = str(path)
     fn_dn, fn_rev = ids_from_filename(path)
-    records = []
-    for sh in sheets:
+    if True:
         cells = build_cells(sh)
         tb = read_title_block(sh, cells, labels=labels)
         boms = find_tables(cells, "bom", sh)
@@ -120,13 +128,14 @@ def read_drawing(path, force_ocr: bool = False, vertical_text: bool = True,
         # "LOCTITE 263", "IS 319") is a product or standard code in a note, not
         # a dimension. Dimension prefixes (Ø, R, M, PCD...) still count.
         coded = set()
-        for ln in reading_order(sh.words):
+        lines_all = reading_order(sh.words)
+        for ln in lines_all:
             for prev, w in zip(ln, ln[1:]):
                 p = prev.text.strip(":,")
                 if (re.fullmatch(r"[A-Za-z][A-Za-z&/.\-]+", p) and p.upper() not in DIM_PREFIXES
                         and w.x0 - prev.x1 < 3.0 * max(w.height, prev.height)):
                     coded.add(id(w))
-        for ln in reading_order(sh.words):
+        for ln in lines_all:
             for w, nxt in zip(ln, ln[1:]):
                 # '86±4 g' read as '8644 g': a value followed by a mass unit
                 # is a weight, never a dimension.
@@ -145,12 +154,12 @@ def read_drawing(path, force_ocr: bool = False, vertical_text: bool = True,
                 except ValueError:
                     pass
 
-        full = "\n".join(" ".join(w.text for w in ln) for ln in reading_order(sh.words))
+        full = "\n".join(" ".join(w.text for w in ln) for ln in lines_all)
         fm = re.search(form_id_re, full) if form_id_re else None
         low = sorted({w.text for w in sh.words if w.conf < 60 and len(w.text) >= 3}) if sh.text_source == "ocr" else []
 
-        records.append(DrawingRecord(
-            file=Path(path).name, page=sh.page_number, page_count=len(sheets),
+        record = DrawingRecord(
+            file=Path(path).name, page=sh.page_number, page_count=page_count,
             text_source=sh.text_source, producer=sh.producer, rotation_deg=sh.rotation_deg,
             paper_size=sh.paper_size, orientation=sh.orientation,
             filename_drawing_number=fn_dn, filename_revision=fn_rev,
@@ -159,5 +168,6 @@ def read_drawing(path, force_ocr: bool = False, vertical_text: bool = True,
             form_id=fm.group(0) if fm else None, dimension_values=sorted(set(dims)),
             low_confidence_words=low, text_lines=full.splitlines(),
             warnings=sh.warnings + tb.warnings,
-        ))
-    return records
+        )
+    parts = {"cells": cells, "title_block": tb, "boms": boms, "revisions": revs, "excluded_boxes": boxes}
+    return record, parts
