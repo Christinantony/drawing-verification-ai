@@ -101,8 +101,13 @@ _TABLE_HEADER_RE = re.compile(r"\bQTY\b|DESCRIPTION|SL\.?\s*N[O0]|REF\.?\s*/|/\s
 
 def _is_table_header(c: Cell) -> bool:
     """BOM / revision-table header cells ("REF./MATERIAL", "REV NO.") contain
-    title-block label words but are not title-block fields."""
-    return bool(_TABLE_HEADER_RE.search(c.text))
+    title-block label words but are not title-block fields. A view label
+    ("DETAIL A / SCALE 5 : 1", "SECTION B-B / SCALE 1:4") isn't either, even
+    when its frame touches the title block."""
+    return bool(_TABLE_HEADER_RE.search(c.text) or _VIEW_LABEL_RE.search(c.text))
+
+
+_VIEW_LABEL_RE = re.compile(r"\b(DETAIL|SECTION|VIEW)\s+[A-Z0-9]{1,3}(\s*-\s*[A-Z0-9]{1,3})?\b[\s\S]{0,6}SCALE", re.I)
 
 
 def _touching(a: Cell, b: Cell, gap: float = 3.0) -> bool:
@@ -251,7 +256,12 @@ def read_title_block(sheet: Sheet, cells: Optional[List[Cell]] = None,
     multi: Dict[str, List[str]] = {}
     label_only: List[Tuple[str, Cell]] = []
     labelled_ids = set()
-    for c in tb_cells:
+    # When a label appears in more than one cell (a BOM or a view frame that
+    # touches the title block), the cell nearest the drawing-number cell is
+    # the title block's own; visit cells in that order so it wins.
+    anchor = tb_cells[0]
+    order = sorted(tb_cells, key=lambda c: (c.xc - anchor.xc) ** 2 + (c.yc - anchor.yc) ** 2)
+    for c in order:
         if _is_table_header(c):
             continue
         hits = _label_hits(c.text, pats)
@@ -269,7 +279,7 @@ def read_title_block(sheet: Sheet, cells: Optional[List[Cell]] = None,
                 label_only.append((name, c))
                 continue
             if name in MULTI_FIELDS:
-                multi.setdefault(name, []).append(value)
+                multi.setdefault(name, []).append((c.y0, c.x0, value))
             elif fields.get(name) is None:
                 fields[name] = value
 
@@ -294,12 +304,12 @@ def read_title_block(sheet: Sheet, cells: Optional[List[Cell]] = None,
         if best is not None:
             v = _clean_value(best.text)
             if name in MULTI_FIELDS:
-                multi.setdefault(name, []).append(v)
+                multi.setdefault(name, []).append((best.y0, best.x0, v))
             else:
                 fields[name] = v
 
     for name, vals in multi.items():
-        fields[name] = ", ".join(vals)
+        fields[name] = ", ".join(v for *_, v in sorted(vals, key=lambda t: (round(t[0] / 4), t[1])))
     fields = {k: v for k, v in fields.items() if not k.startswith("_")}
 
     # Date with no "DATE" label (e.g. under the REV box).

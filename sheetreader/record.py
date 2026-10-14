@@ -23,6 +23,8 @@ from .titleblock import read_title_block
 # "AT-F-DRG-01 REV.00". Override with read_drawing(form_id_re=...).
 DEFAULT_FORM_ID_RE = r"\b[A-Z]{1,4}-F-[A-Z]{2,5}-\d{2}\b(?:\s*REV\.?\s*\d{1,2})?"
 
+# Words that may stand right before a dimension value.
+DIM_PREFIXES = {"R", "SR", "M", "DIA", "PCD", "PCD.", "TYP", "THK", "MAX", "MIN", "REF", "X", "CSK", "C/B", "CBORE", "DEPTH", "DP"}
 DIM_RE = re.compile(r"^[*ØR]?(\d{1,5}(?:\.\d{1,3})?)(?:°)?$")
 
 
@@ -114,9 +116,27 @@ def read_drawing(path, force_ocr: bool = False, vertical_text: bool = True,
             return any(b[0] <= w.xc <= b[2] and b[1] <= w.yc <= b[3] for b in boxes)
 
         mx, my = sh.width * 0.03, sh.height * 0.03
+        # A number right after a word ("ARALDITE AW 4510", "ANABOND 666",
+        # "LOCTITE 263", "IS 319") is a product or standard code in a note, not
+        # a dimension. Dimension prefixes (Ø, R, M, PCD...) still count.
+        coded = set()
+        for ln in reading_order(sh.words):
+            for prev, w in zip(ln, ln[1:]):
+                p = prev.text.strip(":,")
+                if (re.fullmatch(r"[A-Za-z][A-Za-z&/.\-]+", p) and p.upper() not in DIM_PREFIXES
+                        and w.x0 - prev.x1 < 3.0 * max(w.height, prev.height)):
+                    coded.add(id(w))
+        for ln in reading_order(sh.words):
+            for w, nxt in zip(ln, ln[1:]):
+                # '86±4 g' read as '8644 g': a value followed by a mass unit
+                # is a weight, never a dimension.
+                if re.fullmatch(r"(g|gm|grams?|kg)\.?", nxt.text, re.I) and nxt.x0 - w.x1 < 1.5 * w.height:
+                    coded.add(id(w))
         dims = []
         for w in sh.words:
             if excluded(w) or w.conf < 70 or not (mx < w.xc < sh.width - mx and my < w.yc < sh.height - my):
+                continue
+            if id(w) in coded:
                 continue
             m = DIM_RE.match(w.text)
             if m and "." in m.group(1) or (m and len(m.group(1)) >= 2):

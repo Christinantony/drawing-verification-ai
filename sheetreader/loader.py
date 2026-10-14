@@ -157,12 +157,20 @@ def _vector_segments(page, min_len_pt: float) -> Tuple[List[Segment], List[Segme
             for a, b in pts:
                 a, b = a * mat, b * mat
                 dx, dy = abs(b.x - a.x), abs(b.y - a.y)
-                if dy <= 0.02 * max(dx, 1e-6) and dx >= min_len_pt:
+                if dy <= 0.02 * max(dx, 1e-6) and dx >= 0.5:
                     y = (a.y + b.y) / 2
                     hs.append(Segment(min(a.x, b.x), y, max(a.x, b.x), y))
-                elif dx <= 0.02 * max(dy, 1e-6) and dy >= min_len_pt:
+                elif dx <= 0.02 * max(dy, 1e-6) and dy >= 0.5:
                     x = (a.x + b.x) / 2
                     vs.append(Segment(x, min(a.y, b.y), x, max(a.y, b.y)))
+    # CAD exports often draw a table's column lines one row at a time, and a
+    # BOM row can be shorter than the minimum line length (3.7 mm rows on a
+    # real SolidWorks sheet). Join touching collinear pieces first, then apply
+    # the length limit, so the column line survives and short geometry
+    # (ticks, arrowheads) still doesn't.
+    from .cells import merge_segments
+    hs = [s for s in merge_segments(hs, True, gap=0.6, pos_tol=0.4) if s.x1 - s.x0 >= min_len_pt]
+    vs = [s for s in merge_segments(vs, False, gap=0.6, pos_tol=0.4) if s.y1 - s.y0 >= min_len_pt]
     return hs, vs
 
 

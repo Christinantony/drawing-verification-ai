@@ -5,9 +5,10 @@ from .store import dumps
 
 
 def escape(value):
-    # Escape HTML and Markdown metacharacters from drawings/model text.
-    import html
-    text = html.escape(str(value), quote=False)
+    # Escape HTML tags and Markdown metacharacters from drawings/model text.
+    # '&' is left alone: drawing numbers like 'E-03A&B' must read as printed
+    # in a plain-text viewer, and a bare '&' cannot start a tag.
+    text = str(value).replace("<", "&lt;").replace(">", "&gt;")
     for char in ("\\", "`", "*", "_", "[", "]", "#", "|"):
         text = text.replace(char, "\\" + char)
     return text.replace("\n", " ")

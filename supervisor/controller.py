@@ -119,15 +119,23 @@ class Controller:
             if remaining <= 0:
                 raise TimeoutError("Investigation time limit reached")
             thinking = self.thinking == "on" or (self.thinking == "auto" and turn > 0)
-            # A conservative UTF-8 byte bound avoids silent prompt truncation for text.
-            byte_budget = sum(len(m["content"].encode("utf-8")) for m in messages)
+            # Token estimate: 2 UTF-8 bytes per token. Real evidence JSON runs
+            # about 3 bytes/token on Gemma; 2 leaves room for digit-heavy text.
+            # (Counting 1 byte = 1 token refused real drawings at a third of
+            # the window.) The prompt_eval_count check below catches the rest.
+            token_estimate = sum(len(m["content"].encode("utf-8")) for m in messages) // 2
             image_reserve = 4096 * sum(len(m.get("images", [])) for m in messages)
-            if byte_budget + self.max_tokens + image_reserve + 512 > self.client.context:
+            if token_estimate + self.max_tokens + image_reserve + 512 > self.client.context:
                 raise ValueError("Context budget exhausted; split evidence or increase --context")
             schema = review_schema(required, turn == self.rounds, evidence=ws.evidence, allowed=allowed)
             content, counters = self.client.chat(messages, thinking=thinking, timeout=remaining,
                                                   max_tokens=self.max_tokens,
                                                   response_schema=schema)
+            used = (counters or {}).get("prompt_eval_count") or 0
+            if used and used + self.max_tokens >= self.client.context - 16:
+                # Ollama drops the start of a prompt that does not fit, silently.
+                raise ValueError(f"Prompt filled the {self.client.context}-token context ({used} tokens) "
+                                 "and may have been cut; increase --context")
             metrics.append(counters)
             ws.store.event(ws.run, "model_turn", {"group": group["id"], "turn": turn,
                 "thinking": thinking, "response": content, "metrics": counters})
