@@ -1,0 +1,11 @@
+{
+  "model": {"name": "gemma4:26b", "seconds_per_call": 300, "vision": true, "doubt_passes": 2},
+  "shop_words": ["KAPTON", "LITZ", "PREFORM"],
+  "severity": {"B3": "must", "C7": "look"},
+  "required_fields": ["drawing_number", "title", "material", "weight", "scale", "size", "sheet",
+                      "revision", "date", "drawn_by", "checked_by"],
+  "drawing_types": {
+    "schematic": {"title_words": ["SCHEMATIC"], "exempt": ["material", "weight", "scale"]},
+    "installation": {"title_words": ["INSTALLATION"], "exempt": ["material"]}
+  }
+}

@@ -338,7 +338,7 @@ def _titles_agree(a, b):
 
 
 def split_refs(v):
-    """'VT-X-E-04, VT-X-E-03' -> two references (a drawing used in two
+    """'XY-X-E-04, XY-X-E-03' -> two references (a drawing used in two
     assemblies). 'A&B' inside one number is not a separator."""
     return [p.strip() for p in re.split(r"[,;]|\s+/\s+", v or "") if p.strip()]
 
