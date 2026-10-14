@@ -1,5 +1,9 @@
 # Drawing Verification AI
 
+> **New: Drawing QC agent** - checks the literal parts of a whole drawing set (title block, BOM, notes,
+> references, balloons, checklists) before print, with a local model for judgement calls.
+> See [QC_AGENT.md](QC_AGENT.md): `python -m qc doctor`, then `python -m qc review <folder>`.
+
 > **Supervisor Edition — experimental v0.1.0.** This branch is a separate edition.
 > Start with [SUPERVISOR_EDITION.md](SUPERVISOR_EDITION.md) for installation and the new CLI.
 > The existing readers and checks remain unchanged from commit `1255b86`.
@@ -32,7 +36,7 @@ The tools were rebuilt against real company drawings: two SolidWorks exports and
 | BOM header at the **bottom**, items numbered upward; one item spanning sub-rows | Rows are read outward from the header, in either direction, and anchored on the item-number cell |
 | **Vertical dimensions** came back reversed (`20.5` → `5.02`) | Every word keeps its reading direction; tolerances are found in the text's own frame |
 | `±` and `Ø` drawn as **graphics**; stacked limits (`0.0` over `-0.2`) as separate words | Tolerances read by position: a bare small figure after a dimension is ±, two figures one over the other are upper/lower limits |
-| OCR look-alikes (`VI-` for `VT-`, `±` read as `#`, `=` or `2`) | Identifiers from OCR are compared allowing look-alike characters; general tolerances pick the reading that is plausible for its tier |
+| OCR look-alikes (`AI-` for `AT-`, `±` read as `#`, `=` or `2`) | Identifiers from OCR are compared allowing look-alike characters; general tolerances pick the reading that is plausible for its tier |
 
 ![sheetreader on a SolidWorks-style export: cells from loose lines, title block, BOM with header at bottom, revision table, and stacked / ± / vertical tolerances](assets/sheetreader_overlay.png)
 
