@@ -111,9 +111,17 @@ def resolve_tolerance(match: MatchResult, general: GeneralToleranceTable) -> Tup
     return value, "general_table", notes
 
 
+FILL_CONFIRMED = "FFF2CC"   # light yellow
+FILL_TO_CONFIRM = "F8CBAD"  # light orange
+
+
 def process(pdf_path: str, checklist_path: str, output_path: Optional[str], page_number: int = 0,
             zone_col: int = 1, dim_col: int = 2, tol_col: int = 3, overwrite_existing: bool = False,
-            force_ocr: bool = False, ocr_dpi: int = 300) -> List[RowReport]:
+            force_ocr: bool = False, ocr_dpi: int = 300,
+            mark_filled: bool = False) -> List[RowReport]:
+    """mark_filled: shade every inserted cell in the saved copy - yellow when
+    read from the drawing (explicit or general table) at high confidence,
+    orange when assumed or found only near its zone (an engineer must confirm)."""
     layout = load_page_layout(pdf_path, page_number=page_number, force_ocr=force_ocr, ocr_dpi=ocr_dpi)
     grid = detect_grid(layout.tokens, layout.page_width, layout.page_height)
     general = general_from_sheet(layout)
@@ -147,7 +155,11 @@ def process(pdf_path: str, checklist_path: str, output_path: Optional[str], page
                 verdict = "MISMATCH (overwritten)"
         else:
             if tol:
-                checklist_io.write_tolerance(table, row.row_index, tol_col, tol)
+                shade = None
+                if mark_filled:
+                    shade = FILL_CONFIRMED if (source in ("explicit", "general_table")
+                                               and match.confidence == "high") else FILL_TO_CONFIRM
+                checklist_io.write_tolerance(table, row.row_index, tol_col, tol, shade=shade)
                 verdict = "filled"
             else:
                 verdict = "not set"

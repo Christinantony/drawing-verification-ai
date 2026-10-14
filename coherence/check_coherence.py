@@ -217,10 +217,20 @@ def canonicalize_ocr_ids(drawings):
         d["_ocr_corrections"] = []
 
         def fix(v):
-            if not v or ocr_key(v) not in known or alnum(v) == alnum(known[ocr_key(v)]):
+            if not v:
                 return v
-            d["_ocr_corrections"].append(f"{v} -> {known[ocr_key(v)]}")
-            return known[ocr_key(v)]
+            k = ocr_key(v)
+            if k not in known:
+                # One stray or lost character ('Al1' for 'A1'): accept only a
+                # single, unambiguous known number of the same shape.
+                near = {kk for kk in known if _one_edit(k, kk)}
+                if len(near) != 1:
+                    return v
+                k = near.pop()
+            if alnum(v) == alnum(known[k]):
+                return v
+            d["_ocr_corrections"].append(f"{v} -> {known[k]}")
+            return known[k]
 
         if d.get("drawing_no") and d.get("filename_drawing_no") and \
                 alnum(d["drawing_no"]).replace("AND", "") != alnum(d["filename_drawing_no"]):
@@ -228,6 +238,17 @@ def canonicalize_ocr_ids(drawings):
         d["next_assy"] = fix(d.get("next_assy"))
         for line in d.get("bom", []):
             line["ref"] = fix(line.get("ref"))
+
+
+def _one_edit(a, b):
+    """True if a and b differ by exactly one inserted or deleted character
+    (substitutions are already covered by the look-alike key). Long keys only,
+    so short codes can't collide."""
+    if min(len(a), len(b)) < 8 or abs(len(a) - len(b)) != 1:
+        return False
+    if len(a) < len(b):
+        a, b = b, a
+    return any(a[:i] + a[i + 1:] == b for i in range(len(a)))
 
 
 def _letter_prefix(s):
@@ -288,6 +309,14 @@ class DrawingIndex:
         (only OCR'd sheets are indexed under look-alike keys)."""
         return self.find(ref) or self.find(ref, ocr=True)
 
+    def find_loose(self, ref):
+        """Match ignoring leading zeros ('E-9B' for 'E-09B'). Used only after
+        an exact match failed, and reported, because the reference is then
+        written differently from the drawing number."""
+        want = loose_ids(ref)
+        return [d for d in self.sheets
+                if want & (loose_ids(d.get("drawing_no")) | loose_ids(d.get("filename_drawing_no")))]
+
 
 def _issue(kind, severity, dwg, detail, sheets):
     return {"type": kind, "severity": severity, "drawing_no": dwg, "detail": detail, "sheets": sheets}
@@ -295,7 +324,36 @@ def _issue(kind, severity, dwg, detail, sheets):
 
 def _titles_agree(a, b):
     na, nb = alnum(a), alnum(b)
-    return bool(na and nb) and (na == nb or na in nb or nb in na)
+    if not (na and nb):
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    # A combined drawing titled 'PCB-A&B' / 'CLAMP-A & B' is called 'PCB-B' /
+    # 'CLAMP-A' in the BOM that uses one of its parts.
+    for x, y in ((a, b), (b, a)):
+        m = re.match(r"^(.*?)[\s-]*([A-Z])\s*(?:&|/|AND)\s*([A-Z])\s*$", (y or "").strip(), re.I)
+        if m and alnum(x) in {alnum(m.group(1)) + m.group(2).upper(), alnum(m.group(1)) + m.group(3).upper()}:
+            return True
+    return False
+
+
+def split_refs(v):
+    """'VT-X-E-04, VT-X-E-03' -> two references (a drawing used in two
+    assemblies). 'A&B' inside one number is not a separator."""
+    return [p.strip() for p in re.split(r"[,;]|\s+/\s+", v or "") if p.strip()]
+
+
+def loose_ids(s):
+    """Keys that ignore leading zeros in each number group: 'E-9B' ~ 'E-09B'.
+    Worked on the written form, so '200-03B' keeps its group boundary."""
+    if not s:
+        return set()
+    return id_keys(re.sub(r"(?<![0-9])0+(?=[0-9])", "", str(s)))
+
+
+def _own_keys(d, ocr=True):
+    """Every key a sheet answers to: its title-block number and its file name."""
+    return id_keys(d.get("drawing_no"), ocr) | id_keys(d.get("filename_drawing_no"), ocr)
 
 
 def check_drawings(drawings):
@@ -305,6 +363,19 @@ def check_drawings(drawings):
     mark_drawing_refs(drawings)
     issues = []
     idx = DrawingIndex(drawings)
+
+    def lookup(ref, d, where):
+        found = idx.find_any(ref)
+        if found:
+            return found
+        found = idx.find_loose(ref)
+        if found:
+            names = ", ".join(sorted({c.get("drawing_no") or c.get("filename_drawing_no") for c in found}))
+            issues.append(_issue("Reference written differently from drawing number", "medium",
+                                 d.get("drawing_no"),
+                                 f"{where} writes {ref}, but the drawing is numbered {names}. "
+                                 "Use the drawing number exactly as it is on the drawing.", [d] + found))
+        return found
 
     by_no = defaultdict(list)
     for d in drawings:
@@ -328,7 +399,7 @@ def check_drawings(drawings):
             ref = line.get("ref_part_no")
             if not ref:
                 continue
-            children = idx.find_any(ref)
+            children = lookup(ref, d, f"BOM item {line.get('item_no') or '?'}")
             if not children:
                 issues.append(_issue("BOM references missing drawing", "low", parent,
                                      f"BOM item {line.get('item_no') or '?'} '{line.get('description')}' "
@@ -340,37 +411,43 @@ def check_drawings(drawings):
                     issues.append(_issue("BOM description vs drawing title mismatch", "medium", parent,
                                          f"BOM calls {ref} '{line['description']}' but that drawing's title "
                                          f"is '{c['title']}'.", [d, c]))
-                if c.get("next_assy") and parent and not (
-                        id_keys(c["next_assy"], c.get("_ocr") or d.get("_ocr")) &
-                        id_keys(parent, c.get("_ocr") or d.get("_ocr"))):
+                ocr = c.get("_ocr") or d.get("_ocr")
+                c_parents = set()
+                for p in split_refs(c.get("next_assy")):
+                    c_parents |= id_keys(p, ocr) | loose_ids(p)
+                mine = _own_keys(d, ocr) | loose_ids(d.get("drawing_no")) | loose_ids(d.get("filename_drawing_no"))
+                if c.get("next_assy") and parent and not (c_parents & mine):
                     issues.append(_issue("Child's NEXT ASSY. is a different drawing", "medium", parent,
                                          f"{parent}'s BOM lists {c['drawing_no']}, but {c['drawing_no']}'s "
                                          f"NEXT ASSY. is {c['next_assy']}.", [d, c]))
 
     # NEXT ASSY. -> parent BOM.
     for d in drawings:
-        this_no, nxt = d.get("drawing_no"), d.get("next_assy")
-        if not (this_no and nxt):
+        this_no = d.get("drawing_no") or d.get("filename_drawing_no")
+        if not (this_no and d.get("next_assy")):
             continue
-        parents = idx.find_any(nxt)
-        if not parents:
-            issues.append(_issue("NEXT ASSY. points to unknown drawing", "low", this_no,
-                                 f"NEXT ASSY. = {nxt}, which is not in this folder - add it to check the link.",
-                                 [d]))
-            continue
-        mine = id_keys(this_no, True)
-        listed = any(mine & id_keys(line.get("ref_part_no") or line.get("ref"), True)
-                     for p in parents for line in p.get("bom", []))
-        if not listed:
-            issues.append(_issue("NEXT ASSY. not reciprocated in parent BOM", "high", this_no,
-                                 f"{this_no} says NEXT ASSY. = {nxt}, but {nxt}'s BOM does not list {this_no}.",
-                                 [d] + parents))
+        mine = _own_keys(d)
+        mine_loose = loose_ids(d.get("drawing_no")) | loose_ids(d.get("filename_drawing_no"))
+        for nxt in split_refs(d["next_assy"]):
+            parents = idx.find_any(nxt) or idx.find_loose(nxt)
+            if not parents:
+                issues.append(_issue("NEXT ASSY. points to unknown drawing", "low", this_no,
+                                     f"NEXT ASSY. = {nxt}, which is not in this folder - add it to check the link.",
+                                     [d]))
+                continue
+            refs = [line.get("ref_part_no") or line.get("ref") for p in parents for line in p.get("bom", [])]
+            listed = any(mine & id_keys(r, True) or mine_loose & loose_ids(r) for r in refs)
+            if not listed:
+                issues.append(_issue("NEXT ASSY. not reciprocated in parent BOM", "high", this_no,
+                                     f"{this_no} says NEXT ASSY. = {nxt}, but {nxt}'s BOM does not list {this_no}.",
+                                     [d] + parents))
 
     # Same template form, different general tolerances.
     by_form = defaultdict(list)
     for d in drawings:
         if d.get("form_id") and d.get("general_tolerance"):
             by_form[re.sub(r"\s*REV.*$", "", d["form_id"])].append(d)
+    flagged = set()
     for form, sheets in by_form.items():
         sigs = defaultdict(list)
         for s in sheets:
@@ -384,6 +461,35 @@ def check_drawings(drawings):
             issues.append(_issue("Same template form, different general tolerances", "medium", form,
                                  f"Drawings on form {form} disagree: " + " | ".join(parts) +
                                  ". Confirm which is intended for each part.", sheets))
+            flagged |= {id(x) for x in sheets}
+
+    # A drawing whose general tolerances differ from the rest of the set (its
+    # form ID may be unreadable, e.g. on an OCR'd sheet). Flagged only against
+    # a clear majority, so a set that mixes two standards on purpose is
+    # reported once per odd drawing, not for every sheet.
+    sigs = defaultdict(list)
+    for d in drawings:
+        gt = d.get("general_tolerance") or {}
+        sig = tuple((k, gt.get(k)) for k in ("without_decimal", "one_decimal", "two_decimal"))
+        if all(v for _, v in sig):
+            sigs[sig].append(d)
+    if len(sigs) > 1:
+        major, majority = max(sigs.items(), key=lambda kv: len(kv[1]))
+        total = sum(len(v) for v in sigs.values())
+        if len(majority) >= 3 and len(majority) >= 0.7 * total:
+            for sig, ss in sigs.items():
+                if sig == major:
+                    continue
+                for x in ss:
+                    if id(x) in flagged:
+                        continue
+                    mine = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in sig)
+                    theirs = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in major)
+                    issues.append(_issue("General tolerances differ from the rest of the set", "medium",
+                                         x.get("drawing_no") or x["_file"],
+                                         f"{x.get('drawing_no') or x['_file']} has {mine}; the other "
+                                         f"{len(majority)} drawings in this set have {theirs}. "
+                                         "Confirm which is intended for this part.", [x]))
     return issues
 
 

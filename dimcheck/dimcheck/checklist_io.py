@@ -136,9 +136,26 @@ def set_cell_text(cell: _Cell, text: str) -> None:
             r.text = ""
 
 
-def write_tolerance(table: Table, row_index: int, tol_col: int, text: str) -> None:
+def shade_cell(cell: _Cell, fill_hex: str) -> None:
+    """Set a cell's background colour (hex like 'FFF2CC')."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    tc_pr = cell._tc.get_or_add_tcPr()
+    for old in tc_pr.findall(qn("w:shd")):
+        tc_pr.remove(old)
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill_hex)
+    tc_pr.append(shd)
+
+
+def write_tolerance(table: Table, row_index: int, tol_col: int, text: str,
+                    shade: Optional[str] = None) -> None:
     cell = table.rows[row_index].cells[tol_col]
     set_cell_text(cell, text)
+    if shade:
+        shade_cell(cell, shade)
 
 
 def save(document: docx.Document, out_path: str) -> None:

@@ -138,8 +138,8 @@ def test_matching_checklist_is_skipped_mismatch_is_reviewed(folder, tmp_path):
     try:
         assert ws.checklist_status["XY-F-DCL-XY-100-01_REV.01.docx"] == "clean"
         assert not [p for p in ws.plan["planned"] if p["kind"] in ("checklist", "check_result")]
-        # The empty cell is a warning with the drawing's value, not an incomplete check.
-        assert any(w["code"] == "checklist_cell_empty" and "±1" in w["message"] for w in ws.warnings)
+        # The empty cell is filled in the copy and reported, not an incomplete check.
+        assert any(w["code"] == "tolerance_inserted" and "±1" in w["message"] for w in ws.warnings)
     finally:
         store.close()
 
@@ -178,3 +178,60 @@ def test_plan_command_lists_files_and_uses_no_model(folder, tmp_path, capsys):
     assert "XY-100-01.dwg" in md and "not supported" in md and "## Warnings" in md
     data = json.loads(next((out / "plans").glob("*.json")).read_text(encoding="utf-8"))
     assert data["plan"]["files"]["XY-100-01_REV.01.pdf"] == "read"
+
+
+def _cells(path):
+    t = docx.Document(str(path)).tables[0]
+    return [[c.text for c in row.cells] for row in t.rows]
+
+
+def _fill(path, row):
+    from docx.oxml.ns import qn
+    tc = docx.Document(str(path)).tables[0].rows[row].cells[3]._tc
+    shd = tc.tcPr.find(qn("w:shd")) if tc.tcPr is not None else None
+    return shd.get(qn("w:fill")) if shd is not None else None
+
+
+def test_supervisor_fills_only_empty_tolerance_cells_in_a_copy(folder, tmp_path):
+    make_cad_like_drawing(str(folder / "XY-100-01_REV.01.pdf"))
+    source = folder / "XY-F-DCL-XY-100-01_REV.01.docx"
+    _checklist(source, [("C4", "50.0", ""),        # stacked limits on the drawing
+                        ("C3", "30.5", "±0.5"),    # wrong value: flagged, never changed
+                        ("B3", "12", ""),          # general table
+                        ("A1", "999", "")])        # not on the drawing: stays empty
+    before = _cells(source)
+    ws, store = _workspace(folder, tmp_path)
+    try:
+        r = ws.checklist_results[source.name]
+        copy = r["completed_copy"]
+        assert copy and copy.endswith("XY-F-DCL-XY-100-01_REV.01_completed.docx")
+        after = _cells(copy)
+        assert _cells(source) == before                     # source untouched
+        assert len(after) == len(before)                    # no rows added
+        assert [row[3] for row in after[1:]] == ["0/-0.2", "±0.5", "±1", ""]
+        assert [row[:3] for row in after] == [row[:3] for row in before]   # zones/dimensions unchanged
+        assert _fill(copy, 1) == "FFF2CC" and _fill(copy, 3) == "FFF2CC"   # inserted, highlighted
+        assert _fill(copy, 2) is None and _fill(copy, 4) is None          # not inserted, not highlighted
+        assert r["inserted"] == 2 and r["mismatched"] == ["C3 30.5"] and r["still_empty"] == ["A1 999"]
+        assert r["complete"] is False
+        assert any("left empty" in u["question"] and "999" in u["question"] for u in ws.incomplete)
+        assert any(f["severity"] == "high" and "C3" in f["claim"] for f in ws.baseline)
+        result = Controller(ws, FakeModel()).review()
+        assert result["checklists"][source.name]["inserted"] == 2
+        from supervisor.report import write
+        md = write(ws, result).read_text(encoding="utf-8")
+        assert "## Checklists" in md and "A1 999" in md and "| NO |" in md
+    finally:
+        store.close()
+
+
+def test_complete_checklist_needs_no_copy(folder, tmp_path):
+    make_cad_like_drawing(str(folder / "XY-100-01_REV.01.pdf"))
+    _checklist(folder / "XY-F-DCL-XY-100-01_REV.01.docx", GOOD_ROWS)
+    ws, store = _workspace(folder, tmp_path)
+    try:
+        r = ws.checklist_results["XY-F-DCL-XY-100-01_REV.01.docx"]
+        assert r["complete"] and r["inserted"] == 0 and r["completed_copy"] is None
+        assert not list((tmp_path / "out").rglob("*_completed.docx"))
+    finally:
+        store.close()

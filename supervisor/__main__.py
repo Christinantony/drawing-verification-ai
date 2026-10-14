@@ -30,7 +30,8 @@ def parser():
         cmd = sub.add_parser(name)
         cmd.add_argument("--model", default="gemma4:e4b")
         cmd.add_argument("--host", default="http://localhost:11434")
-        cmd.add_argument("--seconds", type=positive, default=180, help="Model call / investigation time budget")
+        cmd.add_argument("--seconds", type=positive, default=600,
+                         help="Time budget per reviewed section, seconds (a CPU at ~7 tok/s needs several minutes)")
         cmd.add_argument("--context", type=positive, default=16384)
         cmd.add_argument("--vision", action="store_true")
         if name in ("review", "plan"):
@@ -135,6 +136,10 @@ def main(argv=None):
                             args.max_tokens, args.thinking, args.reuse).review()
         report = write(ws, result)
         print(f"Report: {report}\nCoverage: {result['coverage']}; {result['issue_status']}")
+        for name, r in sorted(result.get("checklists", {}).items()):
+            state = "complete" if r["complete"] else f"{len(r['still_empty'])} cell(s) still empty"
+            copy = f" -> {r['completed_copy']}" if r["completed_copy"] else ""
+            print(f"Checklist {name}: {r['inserted']} tolerance(s) inserted, {state}{copy}")
         return 2 if result["coverage"] == "incomplete" else (1 if result["issue_status"] == "issues_found" else 0)
     except Exception as exc:
         print(f"Supervisor error: {exc}")

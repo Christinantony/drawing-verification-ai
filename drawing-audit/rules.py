@@ -258,6 +258,8 @@ def check_people(rec, f: Findings):
 
 def check_weight(rec, f: Findings):
     w = rec["title_block"].get("weight")
+    if w and re.fullmatch(r"\s*(SEE|REFER(?:\s+TO)?|AS\s+PER)\b.*", w, re.I):
+        return  # 'SEE NOTE' / 'SEE TABLE': the weight is given elsewhere on the sheet
     if w and not re.search(r"\d\s*(?:±\s*\d+(?:\.\d+)?)?\s*\(?\s*(g|kg|gm|grams?)\b", w, re.I):
         f.add("low", "missing_field", "title_block.weight", f"WEIGHT '{w}' has no unit.")
 

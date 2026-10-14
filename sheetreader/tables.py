@@ -91,7 +91,7 @@ def _header_rows(cells: Sequence[Cell], key: str, columns) -> List[Dict[str, Cel
     return rows
 
 
-_QTY_RE = re.compile(r"^(\d+(\.\d+)?\s*(NOS?|PCS?|NO|SETS?|m|mm|ml|g|kg|L)?\.?|A/?R|AS\s*REQ'?D?)$", re.I)
+_QTY_RE = re.compile(r"^(\d+(\.\d+)?\s*(NOS?|PCS?|NO|SETS?|m|mm|ml|g|kg|L|mtr)?\.?|A/?R|AS\s*REQ'?D?|SEE\s+(TABLE|NOTE)\b.*)$", re.I)
 
 
 def _columns(header: Dict[str, Cell]) -> List[Tuple[str, float, float]]:
