@@ -292,6 +292,12 @@ class SetMap:
         pat = getattr(r, "pattern", None) or self.pattern
         for cand, why in self._variants(r.number, pat):
             hit = self.find(cand)
+            if hit and r.kind == "file" and pat.category and why == f"'{pat.category}-' is missing":
+                # Model files (STEP / DXF / RAR) are named without the category
+                # letter: that is the house style, not a mistake.
+                r.targets, r.status = hit, "ok"
+                r.detail = f"file name without '{pat.category}-' (normal for model files)"
+                return
             if hit:
                 r.targets, r.status = hit, "styled"
                 r.detail = f"written as '{r.number}'; the drawing is {hit[0].record.get('filename_drawing_number') or hit[0].number} ({why})"

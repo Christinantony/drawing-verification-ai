@@ -3,7 +3,7 @@
 
 Planted in the assembly AB-CD 10-E-01:
   * BOM item 2 refers to 'AB-CD 10-E-3'       (leading zero missing; drawing is E-03)
-  * note 2 'USE FILE AB-CD 10-01.STEP'          ('E-' missing)
+  * note 2 'USE FILE AB-CD 10-01.STEP'          (no 'E-': normal for model files)
   * note 3 refers to ITEM NO. 9                 (BOM has items 1-4)
   * note 4 'SEE TABLE 2'                        (no table 2 on the sheet)
   * notes numbered 1, 2, 3, 5                   (gap)
@@ -108,7 +108,7 @@ def make_assembly(path):
 
 
 def make_part(path, number, title, finish="CLEAR CHROMATIZATION (ASTM B449)", next_assy="AB-CD 10-E-01",
-              file_note=None):
+              file_note=None, weight="12±1 g", extra=()):
     doc = pymupdf.open()
     p = doc.new_page(width=W, height=H)
     _frame(p)
@@ -117,7 +117,9 @@ def make_part(path, number, title, finish="CLEAR CHROMATIZATION (ASTM B449)", ne
     _t(p, 300, 300, "NOTE:", 8)
     _t(p, 305, 312, f"1.  USE FILE {file_note or number}.STEP FOR MACHINING", 7)
     _t(p, 305, 322, "2.  BREAK ALL SHARP EDGES", 7)
-    _title_block(p, number, title, "AL 6061-T6", finish, next_assy=next_assy, scale="1:1")
+    for k, line in enumerate(extra):
+        _t(p, 305, 332 + 10 * k, line, 7)
+    _title_block(p, number, title, "AL 6061-T6", finish, weight=weight, next_assy=next_assy, scale="1:1")
     doc.save(path)
     doc.close()
 

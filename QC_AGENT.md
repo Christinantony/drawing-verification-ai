@@ -23,7 +23,7 @@ the agent's behaviour. You don't need to change any code.
 |---|---|---|
 | 1. Intake | Lists the folder: PDFs, Word checklists, unsupported files | code |
 | 2. Read | Text layer if present, else OCR (rotation found automatically) | code |
-| 3. Locate the parts | Boxes the title block, BOM, revision table, every note block, callouts, view labels, legends and balloons. **Layout check:** the model looks at a small image of the sheet with the boxes numbered. It names each box and reports any text block that has no box; the code then boxes it from the words in that area, so the edges stay exact. | code proposes, model judges |
+| 3. Locate the parts | Boxes the title block, BOM, revision table, every note block, callouts, view labels, legends and balloons. **Layout check:** the model looks at a small image of the sheet with the boxes numbered. It names each box and reports any text block that has no box; the code then boxes it from the words in that area, so the edges stay exact. **± values:** SolidWorks draws the ± of '135 ± 10 g' as a graphic, so the text reads '135 10 g'. The model looks at an image of each such value; with a ±, the text becomes '135±10 g'; without one, it is reported (D6). | code proposes, model judges |
 | 4. Map the set | Learns the numbering (one family per product) and resolves every reference in any text: BOM, NEXT ASSY., notes, USE FILE, jigs/moulds | code |
 | 5. QC checks | The catalogue below produces facts. Spelling, "does this note fit its item" and "are the notes clear" are asked as short questions | code + model |
 | 6. Doubt loop | For facts the code can't settle: the model picks one tool (re-read the box, read an image of the box, search the set, open the linked drawing, hand to you), then the code checks again; at most 2 passes | model chooses, code acts |
@@ -35,6 +35,15 @@ the agent's behaviour. You don't need to change any code.
 - Every dropped fact is listed with the model's reason.
 - An open-review observation must quote text that is really on the sheet; any other observation is discarded.
 - Answers must follow a fixed format.
+- Some checks are never dropped by the model (missing title-block fields,
+  wrong references, spelling two ways, ...; `never_drop` in the settings).
+  If the model wants to drop one, it becomes **please look** and the report
+  says so.
+- An open-review observation that compares BOM rows referring to different
+  drawings is discarded: they are different parts.
+- The model gets each sheet's context: what each BOM row refers to and
+  whether its name matches that drawing's title, the parts of each
+  sub-assembly, what SEE TABLE points to, and today's date.
 
 ## The checks
 
@@ -43,8 +52,8 @@ the agent's behaviour. You don't need to change any code.
 | **A** | A1 BOM row complete (item, name, qty; no gaps/duplicates) · A2 balloons match BOM · A3 BOM name vs child title · A4 view label vs drawing · A5 title block complete (exemptions by drawing type) · A6 number and revision vs file name | must / look |
 | **B** | B1 known misspellings · B2 unknown words (model decides) · B3 same term spelt two ways in the set · B4 standard callouts written two ways · B5 unsure OCR words | must / look |
 | **C** | C1 every drawing reference exists and is written in the set's style · C2 NEXT ASSY. vs parent BOM · C3 item numbers in notes exist · C4 note fits its item (model) · C5 SEE NOTE / TABLE / DETAIL target exists · C6 USE FILE names this drawing · C7 jig, mould and template numbers listed · C8 checklist vs drawing (fills empty tolerance cells in a copy) | must / look |
-| **D** | D1 note numbering · D2 note values vs title block · D3 same note worded differently · D4 note complete and clear (model) · D5 legend vs symbol | must / look |
-| **E** | E1 general tolerances within a product · E2 dates within a product | look |
+| **D** | D1 note numbering · D2 note values vs title block · D3 same note worded differently · D4 note complete and clear (model) · D5 legend vs symbol · D6 value written without ± (checked on the image) | must / look |
+| **E** | E1 general tolerances within a product · E2 dates (DD/MM/YYYY): none after today, title block agrees with the current revision in the revision table, dates agree within a product | must / look |
 
 **must** = must fix before print · **look** = please look · **check by hand** =
 the agent could not settle it.
@@ -139,8 +148,7 @@ found:
 
 - one title-block drawing number without the company prefix
 - a BOM reference without a leading zero ("E-9B" for "E-09B")
-- two "USE FILE" notes without the category letter
-- one finish spelt two ways (CHROMATISATION / CHROMATIZATION)
+- one finish spelt two ways (CHROMATISATION / CHROMATIZATION), must
 - one sheet whose general tolerances differ from the other 16
 - missing MATERIAL / WEIGHT fields
 - the jig, mould and template numbers to confirm

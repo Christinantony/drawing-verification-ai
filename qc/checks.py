@@ -39,7 +39,8 @@ CHECK_NAMES = {
     "C4": "Note fits its item", "C5": "SEE NOTE / TABLE / DETAIL target", "C6": "USE FILE names this drawing",
     "C7": "Jig, mould and template numbers", "C8": "Checklist vs drawing",
     "D1": "Note numbering", "D2": "Note vs title block", "D3": "Same note worded differently",
-    "D4": "Note complete and clear", "D5": "Legend and symbol", "M1": "Model observation",
+    "D4": "Note complete and clear", "D5": "Legend and symbol", "D6": "Value written without ±",
+    "M1": "Model observation",
     "E1": "General tolerances across the set", "E2": "Dates across the set",
 }
 
@@ -588,6 +589,34 @@ def check_E(sheets, cfg, smap=None) -> List[Finding]:
                                        f"General tolerances {', '.join(sig)} (none / one / two decimals); the other "
                                        f"{len(majority)} drawings use {', '.join(major)}. Confirm this is intended.",
                                        s, "TOLERANCES", "title block", locate(s, "TOLERANCES UNLESS")))
+    # Dates are DD/MM/YYYY. A date after today cannot be right; a revision-table
+    # date must correspond to the title-block date of that revision.
+    import datetime as _dt
+    today = cfg.get("today") or _dt.date.today()
+
+    def _d(v):
+        m = re.search(r"(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})", v or "")
+        if not m:
+            return None
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        y += 2000 if y < 100 else 0
+        try:
+            return _dt.date(y, mo, d)
+        except ValueError:
+            return None
+    for s in sheets:
+        tb = s.record["title_block"]
+        d = _d(tb.get("date"))
+        if d and d > today:
+            out.append(Finding("E2", "must", "doubt" if s.ocr else "fail",
+                               f"Title-block date {tb.get('date')} is after today ({today:%d/%m/%Y}).", s,
+                               tb.get("date"), "title block DATE", locate(s, tb.get("date"))))
+        for row in s.record.get("revision_table") or []:
+            rd = _d(row.get("date"))
+            if rd and d and str(row.get("rev", "")).strip(". ") == str(tb.get("revision") or "").strip(". ") and rd != d:
+                out.append(Finding("E2", _sev(cfg, "E2"), "doubt" if s.ocr else "fail",
+                                   f"Revision table gives {row.get('date')} for REV {row.get('rev')}, the title block "
+                                   f"gives {tb.get('date')}.", s, row.get("date"), "revision table", locate(s, row.get("date"))))
     dates = Counter(s.record["title_block"].get("date") for s in sheets if s.record["title_block"].get("date"))
     if len(dates) > 1:
         common, n = dates.most_common(1)[0]

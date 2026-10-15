@@ -43,7 +43,10 @@ def test_set_map_learns_numbering_and_resolves(qcset):
     asm = next(s for s in sheets if s.number == "AB-CD 10-E-01")
     assert {c.number for c in smap.children_of(asm)} == {"AB-CD 10-E-02", "AB-CD 10-E-03"}
     styled = {r.number: r.detail for r in smap.refs if r.status == "styled"}
-    assert "leading zero" in styled["AB-CD 10-E-3"] and "'E-' is missing" in styled["AB-CD 10-01"]
+    assert "leading zero" in styled["AB-CD 10-E-3"]
+    # model files (USE FILE ... .STEP) are named without 'E-': house style, accepted
+    ok = {r.number: r.detail for r in smap.refs if r.status == "ok"}
+    assert "AB-CD 10-01" not in styled and "normal for model files" in ok["AB-CD 10-01"]
     assert [r.number for r in smap.refs if r.kind == "tool"] == ["AB-JIG-CD 10-05"]
 
 
@@ -299,3 +302,90 @@ def test_full_review_with_fake_model(qcset, tmp_path, monkeypatch):
     assert "Review summary" in html and "Dropped by the model" in html and "model + QC policy" in html
     rows = list(csv.DictReader(open(run_dir / "findings.csv", encoding="utf-8-sig")))
     assert any(r["group"] == "dropped" and r["model_said"].startswith("drop") for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Tuning from the engineer's verdicts on a real set
+# ---------------------------------------------------------------------------
+class PmModel(FakeModel):
+    """Sees a ± on the image for 135/10, none for 3/1."""
+    def ask(self, system, user, schema, images=None, max_tokens=300):
+        if "pm" in schema["properties"]:
+            self.calls += 1
+            assert images, "the ± must be checked on an image"
+            return {"pm": "yes" if "135" in user else "no"}
+        return super().ask(system, user, schema, images, max_tokens)
+
+
+def _part(tmp_path, **kw):
+    from make_qc_set import make_part
+    p = tmp_path / "AB-CD 10-E-02 REV.00.pdf"
+    make_part(str(p), "AB-CD 10-E-02", "BASE PLATE", **kw)
+    return read_pdf(p)
+
+
+def test_pm_values_are_checked_on_the_image(tmp_path):
+    from qc.pm import resolve
+    sheets = _part(tmp_path, weight="135 10 g", extra=("3.  APPLY 3 1 g OF ADHESIVE",))
+    fs = resolve(sheets, PmModel(), lambda *_: None, vision=True)
+    q = sheets[0]
+    assert q.record["title_block"]["weight"] == "135±10 g"
+    assert [f.code for f in fs] == ["D6"] and "3 1 g" in fs[0].message and fs[0].severity == "must"
+    assert {p["verdict"] for p in q.pm} == {"confirmed", "absent"}
+
+
+def test_pm_values_without_vision_are_read_as_pm(tmp_path):
+    from qc.model import NoModel
+    from qc.pm import resolve
+    sheets = _part(tmp_path, weight="135 10 g")
+    assert resolve(sheets, NoModel(), lambda *_: None, vision=False) == []
+    assert sheets[0].record["title_block"]["weight"] == "135±10 g" and sheets[0].pm[0]["verdict"] == "assumed"
+
+
+def test_stray_number_is_not_a_note(tmp_path):
+    q = _part(tmp_path, extra=("5",))[0]
+    assert all(n.text.strip() != "5" for n in q.notes) and len(q.notes) == 2
+
+
+def test_never_drop_codes_stay_for_the_engineer(qcset):
+    _, sheets, _ = qcset
+    f = Finding("A5", "must", "fail", "Title block: WEIGHT is empty.", sheets[0], "", "title block")
+    decide([f], sheets, PolicyModel(), load_policy(None), [], config.load(), lambda *_: None)
+    assert f.status == "fail" and f.severity == "look"
+    assert any("kept for the engineer" in h for h in f.history)
+
+
+def test_open_review_does_not_compare_parts_of_different_drawings(qcset):
+    _, sheets, smap = qcset
+    asm = [s for s in sheets if s.number == "AB-CD 10-E-01"]
+
+    class Obs(PolicyModel):
+        def ask(self, system, user, schema, images=None, max_tokens=300):
+            if "observations" in schema["properties"]:
+                assert "refers to drawing AB-CD 10-E-02 titled 'BASE PLATE'" in user
+                return {"observations": [
+                    {"quote": "BASE PLATE", "problem": "BASE PLATE and CLAMP are named inconsistently.", "severity": "look"},
+                    {"quote": "FINAL ASSEMBLY", "problem": "Title is too generic.", "severity": "look"}]}
+            return super().ask(system, user, schema, images, max_tokens)
+    obs = open_review(asm, [], Obs(), load_policy(None), [], lambda *_: None, smap=smap, cfg=config.load())
+    assert [o.quote for o in obs] == ["FINAL ASSEMBLY"]
+
+
+def test_dates_after_today_and_revision_table_mismatch(tmp_path):
+    import datetime
+    q = _part(tmp_path)[0]
+    from qc.checks import check_E
+    cfg = config.load()
+    cfg["today"] = datetime.date(2026, 6, 1)
+    assert any("after today" in f.message for f in check_E([q], cfg))
+    cfg["today"] = datetime.date(2026, 10, 16)
+    assert not any("after today" in f.message for f in check_E([q], cfg))
+    q.record["revision_table"] = [{"rev": q.record["title_block"].get("revision"), "date": "05/07/2026"}]
+    assert any("Revision table gives 05/07/2026" in f.message for f in check_E([q], cfg))
+
+
+def test_policy_holds_the_engineer_rules():
+    p = load_policy(None)
+    for s in ("without\n    the \"E-\"", "value ± tolerance", "sub-assemblies", "exact BOM name",
+              "different drawings are different parts", "DD/MM/YYYY", "SEE TABLE means"):
+        assert s in p, s
