@@ -2,6 +2,8 @@
 
     python -m qc review  FOLDER [--out DIR] [--model gemma4:26b] [--no-model] [--config FILE]
     python -m qc doctor  [--model gemma4:26b]
+    python -m qc learn   [--verdicts DIR]     house rules from your false verdicts (you approve each)
+    python -m qc score   [--verdicts DIR]     how many reported items were real, run by run
 
 Stations, in order:
     1 intake  2 read  3 locate parts  4 map the set  5 QC checks (+ model judgement)
@@ -215,12 +217,21 @@ def review(args) -> int:
     log(f"    {n} doubtful item(s): {sum(f.status == 'cleared' for f in findings if f.history)} cleared, "
         f"{sum(f.status == 'check' for f in findings)} left for you")
 
+    # Lessons from your earlier verdicts: silence what you marked false before
+    from .lessons import read_verdicts, score, silence, with_house_rules
+    vdir = args.verdicts or cfg.get("verdicts_dir")
+    verdicts = read_verdicts(([vdir] if vdir else []) + list(args.examples or cfg.get("examples") or []))
+    if verdicts:
+        log(f"    {len(verdicts)} earlier verdict(s) from your verdicts folder / files")
+    silence(findings, verdicts, smap, cfg, log)
+
     summary = {}
     if steps.get("decide") or steps.get("open_review"):
         from .decide import decide, draft_summary, load_examples, load_policy, open_review
-        policy = load_policy(args.policy or cfg.get("policy_file"))
-        examples = load_examples(args.examples or cfg.get("examples", []))
-        log(f"7/8 Model decisions under the QC policy" + (f" ({len(examples)} earlier verdicts as examples)" if examples else ""))
+        policy = with_house_rules(load_policy(args.policy or cfg.get("policy_file")), vdir)
+        examples = verdicts
+        log(f"7/8 Model decisions under the QC policy" + (" + your house rules" if policy.count("## House rules") else "")
+            + (f" (the most similar of {len(examples)} earlier verdicts as examples)" if examples else ""))
         if steps.get("decide"):
             step("decide")
             decide(findings, sheets, client, policy, examples, cfg, log, smap=smap)
@@ -232,6 +243,7 @@ def review(args) -> int:
             findings += extra
             done("open_review")
             log(f"    open review: {len(extra)} model observation(s)")
+            silence(extra, verdicts, smap, cfg, log)
         if steps.get("summary"):
             step("summary")
             summary = draft_summary(sheets, findings, client, log)
@@ -241,7 +253,9 @@ def review(args) -> int:
 
     log("8/8 Report")
     sp = client.speed()
-    run = {"folder": str(folder), "started": started, "model": client.name, "version": __version__,
+    sc = score(([vdir] if vdir else []) + list(args.examples or cfg.get("examples") or []))
+    run = {"folder": str(folder), "started": started, "model": client.name, "version": __version__, "run_id": run_id,
+           "score": sc[-1] if sc else None,
            "seconds": round(time.monotonic() - t0), "unsupported": unsupported, "timing": timing,
            "decisions": "model + QC policy" if steps.get("decide") else "rules",
            "summary": summary,
@@ -337,6 +351,34 @@ def doctor(args) -> int:
     return 0 if ok else 3
 
 
+def learn_cmd(args) -> int:
+    from .decide import load_policy
+    from .lessons import learn
+    from .model import Client
+    cfg = qc_config.load(args.config)
+    vdir = args.verdicts or cfg.get("verdicts_dir")
+    if not vdir:
+        log("Give your verdicts folder: --verdicts DIR, or \"verdicts_dir\" in your settings file.")
+        return 3
+    m = cfg["model"]
+    c = Client(args.model or m["name"], args.host or m["host"], m["context"], m["seconds_per_call"])
+    try:
+        c.installed()
+    except Exception as e:
+        log(f"Cannot reach Ollama ({e}). `learn` needs the model.")
+        return 3
+    learn(vdir, c, load_policy(cfg.get("policy_file")), log)
+    return 0
+
+
+def score_cmd(args) -> int:
+    from .lessons import score, score_text
+    cfg = qc_config.load(args.config)
+    src = list(args.files or []) + ([args.verdicts or cfg.get("verdicts_dir")] if (args.verdicts or cfg.get("verdicts_dir")) else [])
+    log(score_text(score(src)))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m qc", description="Drawing QC agent (literal text: title block, "
                                 "BOM, notes, references). Offline, local model through Ollama.")
@@ -353,6 +395,7 @@ def main(argv=None) -> int:
                    help="who decides what to report: the model under qc/policy.md (default) or the rules")
     r.add_argument("--policy", help="your QC policy document (default qc/policy.md)")
     r.add_argument("--examples", nargs="*", help="findings.csv files with your verdicts, used as examples")
+    r.add_argument("--verdicts", help="your verdicts folder (marked findings.csv files + house_rules.md)")
     r.add_argument("--skip", help="model steps to skip, comma separated: layout,judge,doubt,decide,open_review,summary")
     d = sub.add_parser("doctor", help="check the setup: packages, Tesseract, Ollama, the model")
     d.add_argument("--model")
@@ -365,9 +408,22 @@ def main(argv=None) -> int:
     lt.add_argument("--model")
     lt.add_argument("--host")
     lt.add_argument("--config")
+    le = sub.add_parser("learn", help="propose house rules from your false verdicts; you approve each one")
+    le.add_argument("--verdicts")
+    le.add_argument("--config")
+    le.add_argument("--model")
+    le.add_argument("--host")
+    sc = sub.add_parser("score", help="how many reported items were real, run by run")
+    sc.add_argument("files", nargs="*", help="marked findings.csv files (default: your verdicts folder)")
+    sc.add_argument("--verdicts")
+    sc.add_argument("--config")
     a = p.parse_args(argv)
     if a.command == "layout-test":
         return layout_test_cmd(a)
+    if a.command == "learn":
+        return learn_cmd(a)
+    if a.command == "score":
+        return score_cmd(a)
     return review(a) if a.command == "review" else doctor(a)
 
 
