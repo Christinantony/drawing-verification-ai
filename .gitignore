@@ -14,3 +14,8 @@ samples/
 local_samples/
 coherence_report.md
 supervisor-output/
+
+# QC runs and your verdicts contain drawing crops and drawing text: keep them local
+qc-out/
+qc-output/
+qc-verdicts/

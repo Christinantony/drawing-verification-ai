@@ -89,15 +89,16 @@ into memory, which can take a minute.
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out"
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --decide rules   # the rules decide (comparison)
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --no-model       # no model at all, about 2 min
-python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --examples "C:\qc-out\<run>\findings.csv"
+python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --verdicts "C:\qc-verdicts"   # learn from your verdicts
+python -m qc learn --verdicts "C:\qc-verdicts"     # turn your false verdicts into house rules (you approve each)
+python -m qc score --verdicts "C:\qc-verdicts"     # how many reported items were real, run by run
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --skip layout,open_review
 python -m qc layout-test "C:\drawings\project-set\<one sheet>.pdf" --out "C:\qc-out"
 ```
 
-- `--examples`: earlier `findings.csv` files with your verdicts. They are
-  shown to the model as examples of your standard. This is the feedback loop:
-  the more sheets you mark, the closer the model gets to your judgement,
-  without retraining and without new code.
+- `--verdicts`: your verdicts folder (or `"verdicts_dir"` in your settings
+  file). See "Teaching the agent" below. `--examples FILE ...` still works
+  for single files.
 - `--skip`: turns off model steps (`layout`, `judge`, `doubt`, `decide`,
   `open_review`, `summary`) when you need a faster run.
 - `layout-test`: tries both layout approaches on one sheet: (A) the model
@@ -115,14 +116,48 @@ Output, in `<out>\<date-time>\`:
   checked
 - `findings.csv`: one row per item, including the items the model dropped.
   `rule_said` and `model_said` show both decisions side by side. Mark each row
-  real / false / don't care in `your_verdict`. Pass the file back with
-  `--examples` on the next run.
+  real / false / don't care in `your_verdict`, or use the buttons in the
+  report (below).
 - `checklists\*_completed.docx`: checklist copies with empty tolerance cells
   filled (yellow = read from the drawing, orange = please confirm). Rows are
   never added and filled cells are never changed.
 - `<out>\latest.txt`: the path of the newest report.
 
 Exit code: 0 = no must-fix item, 1 = must-fix items, 3 = setup problem.
+
+## Teaching the agent (the lessons library)
+
+The model is not retrained. It learns from your verdicts, which stay on your
+PC in one folder, e.g. `C:\qc-verdicts`:
+
+1. **Mark the report.** Every item in `report.html` has *Real / False /
+   Don't care* buttons and a comment box ("why?"). The marks are kept in the
+   browser while you work. **Save verdicts** downloads
+   `verdicts_<run>.csv`; move it into your verdicts folder. Marking the CSV by
+   hand works too.
+2. **Silence list (exact, no model).** On the next run, a finding you marked
+   false or don't care is not reported again when the same check finds the
+   same text in the **same product family**. It is listed under "Silenced by
+   your earlier verdicts" with your date and comment. Mark it Real to bring it
+   back. Checks that are never dropped (`never_drop`: missing title-block
+   fields, wrong references, spelling two ways, ...) are not silenced; they
+   become please look and say why.
+3. **Relevant examples (model).** Each batch of facts is shown the 10 earlier
+   verdicts most like it: same check, similar words, same product family.
+   All your verdicts are kept, not only the first few.
+4. **House rules (model, approved by you).** `python -m qc learn` asks the
+   model to turn your new false verdicts into general rules, e.g. "A BOM row
+   may name a multi-coat paint system". For each one you answer
+   accept / edit / reject / skip. Accepted rules go into
+   `house_rules.md` in your verdicts folder and are read next to the QC
+   policy on every run. Edit or delete lines in that file freely. A verdict is
+   proposed only once (`learnt.json` remembers).
+5. **Score.** `python -m qc score` prints, per marked run, how many reported
+   items were real and how many drops were wrong, and per check over all
+   runs. The report shows the last marked run's figure.
+
+Comments teach the most: "PCB-A is a different part (other drawing)" lets
+`learn` write a rule; a bare "false" only silences that one finding.
 
 ## Your QC policy and settings
 

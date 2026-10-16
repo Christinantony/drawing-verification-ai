@@ -33,29 +33,19 @@ def load_policy(path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def load_examples(paths, limit=12) -> List[dict]:
-    """Earlier verdicts from findings.csv files: the user's 'house standard'."""
-    out = []
-    for p in paths or []:
-        try:
-            with open(p, encoding="utf-8-sig") as fh:
-                for row in csv.DictReader(fh):
-                    v = (row.get("your_verdict (real / false / dont care)") or row.get("your_verdict") or "").strip().lower()
-                    if v in ("real", "false", "dont care", "don't care"):
-                        out.append({"check": row.get("check_name") or row.get("check"), "text": row.get("text", ""),
-                                    "finding": row.get("finding", ""), "verdict": v,
-                                    "comment": row.get("your_comment", "")})
-        except OSError:
-            continue
-    # keep a mix: false and don't-care verdicts teach the most
-    out.sort(key=lambda e: e["verdict"] == "real")
-    return out[:limit]
+def load_examples(paths, limit=None) -> List[dict]:
+    """Earlier verdicts from findings.csv files (files or folders): the
+    user's 'house standard'. All are kept; each batch is shown the ones most
+    like it (lessons.pick)."""
+    from .lessons import read_verdicts
+    out = read_verdicts(paths)
+    return out[-limit:] if limit else out
 
 
 def _examples_text(examples) -> str:
     if not examples:
         return ""
-    lines = [f"- {e['check']}: \"{e['finding'][:120]}\" -> engineer said: {e['verdict']}"
+    lines = [f"- {e.get('check_name') or e['check']}: \"{e['finding'][:120]}\" -> engineer said: {e['verdict']}"
              + (f" ({e['comment'][:80]})" if e.get("comment") else "") for e in examples]
     return "\n\nEarlier verdicts by the engineer (follow the same standard):\n" + "\n".join(lines)
 
@@ -111,10 +101,11 @@ def decide(findings, sheets, client, policy, examples, cfg, log, smap=None) -> N
     by_sheet = {}
     for f in facts:
         by_sheet.setdefault(id(f.sheet), (f.sheet, []))[1].append(f)
-    ex = _examples_text(examples)
+    from .lessons import pick
     for sheet, fs in by_sheet.values():
         for i in range(0, len(fs), 12):
             batch = fs[i:i + 12]
+            ex = _examples_text(pick(examples, batch, sheet, smap))
             lines = "\n".join(f"{k + 1}. [{f.code} {f.name}; rule says {f.severity}; "
                               f"{'unsure' if f.status == 'check' else 'certain'}] {f.message}"
                               + (f" (where: {f.where})" if f.where else "")
@@ -168,9 +159,11 @@ def decide(findings, sheets, client, policy, examples, cfg, log, smap=None) -> N
 def open_review(sheets, findings, client, policy, examples, log, max_items=8, smap=None, cfg=None) -> List[Finding]:
     """Model reads a sheet's literal text and reports problems the facts do
     not cover. Each observation must quote text that is on the sheet."""
+    from .lessons import pick
     out = []
-    ex = _examples_text(examples)
     for s in sheets:
+        mine = [f for f in findings if f.sheet is s and f.status in ("fail", "check")]
+        ex = _examples_text(pick(examples, mine, s, smap, codes={"M1"}))
         parts = []
         tb = s.record["title_block"]
         parts.append("TITLE BLOCK: " + "; ".join(f"{k.upper()}={v}" for k, v in tb.items() if v))

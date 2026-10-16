@@ -24,6 +24,7 @@ DEFAULTS = {
     "never_drop": ["A1", "A5", "A6", "B1", "B3", "C1", "C2", "C3", "C5", "C6", "D2", "D6", "E2"],
     "today": None,             # None = the computer's date (dates on drawings are DD/MM/YYYY)
     "examples": [],            # findings.csv files with your verdicts
+    "verdicts_dir": None,      # your verdicts folder: every marked findings.csv in it + house_rules.md
     # must = must fix before print; look = please look (the rules' default;
     # with model decisions these are only the starting point).
     "severity": {

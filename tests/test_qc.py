@@ -389,3 +389,123 @@ def test_policy_holds_the_engineer_rules():
     for s in ("without\n    the \"E-\"", "value ± tolerance", "sub-assemblies", "exact BOM name",
               "different drawings are different parts", "DD/MM/YYYY", "SEE TABLE means"):
         assert s in p, s
+
+
+# ---------------------------------------------------------------------------
+# Lessons library: silence list, relevant examples, house rules, score
+# ---------------------------------------------------------------------------
+def _run_and_mark(folder, out, marks, vdir, extra_args=()):
+    """Run --no-model, mark rows by check code in findings.csv, save to vdir."""
+    assert main(["review", str(folder), "--out", str(out), "--no-model", *extra_args]) in (0, 1)
+    run_dir = Path((out / "latest.txt").read_text(encoding="utf-8")).parent
+    rows = list(csv.DictReader(open(run_dir / "findings.csv", encoding="utf-8-sig")))
+    vk = next(k for k in rows[0] if k.startswith("your_verdict"))
+    for r in rows:
+        if r["check"] in marks:
+            r[vk], r["your_comment"] = marks[r["check"]]
+    vdir.mkdir(exist_ok=True)
+    with open(vdir / "set1_verdicts.csv", "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    return run_dir, rows
+
+
+def test_false_verdict_silences_the_same_finding_next_run(qcset, tmp_path):
+    folder, _, _ = qcset
+    vdir = tmp_path / "verdicts"
+    _, rows1 = _run_and_mark(folder, tmp_path / "o1", {"C7": ("false", "jig is fine"), "C1": ("false", "")}, vdir)
+    assert "rule_finding" in rows1[0]
+    out2 = tmp_path / "o2"
+    main(["review", str(folder), "--out", str(out2), "--no-model", "--verdicts", str(vdir)])
+    run_dir = Path((out2 / "latest.txt").read_text(encoding="utf-8")).parent
+    rows2 = {r["check"] + r["text"]: r for r in csv.DictReader(open(run_dir / "findings.csv", encoding="utf-8-sig"))}
+    c7 = [r for r in rows2.values() if r["check"] == "C7"]
+    assert c7 and all(r["group"] == "silenced" and "jig is fine" in r["history"] for r in c7)
+    # C1 (wrong references) is never silenced: it stays, as please look, and says why
+    c1 = [r for r in rows2.values() if r["check"] == "C1"]
+    assert c1 and all(r["group"] == "look" and "never silenced" in r["history"] for r in c1)
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    assert "Silenced by your earlier verdicts" in html and "Save verdicts" in html and "var ROWS=" in html
+    assert "reported items were real" in html
+
+
+def test_silence_respects_product_family_and_latest_verdict(qcset, tmp_path):
+    from qc.lessons import read_verdicts, silence
+    folder, sheets, smap = qcset
+    fs = [f for f in run_all(sheets, smap, config.load()) if f.code == "C7"]
+    assert fs
+    f = fs[0]
+
+    def write(name, drawing, verdict):
+        p = tmp_path / name
+        with open(p, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            w.writerow(["id", "group", "check", "drawing", "text", "finding", "your_verdict", "your_comment"])
+            w.writerow(["Q001", "look", "C7", drawing, f.quote, f.message, verdict, ""])
+        return p
+
+    other = write("a.csv", "ZZ-QQ 99-E-01", "false")              # another product family
+    assert silence([f], read_verdicts([other]), smap, config.load()) == 0 and f.status == "fail"
+    import os
+    import time as _t
+    first = write("b.csv", "AB-CD 10-E-02", "false")
+    second = write("c.csv", "AB-CD 10-E-02", "real")              # later: you changed your mind
+    os.utime(first, (_t.time() - 100, _t.time() - 100))
+    assert silence([f], read_verdicts([first, second]), smap, config.load()) == 0
+    assert f.status == "fail" and any("marked it real" in h for h in f.history)
+    assert silence([f], read_verdicts([first]), smap, config.load()) == 1 and f.status == "silenced"
+
+
+def test_examples_are_the_most_similar_verdicts():
+    from qc.lessons import pick
+    vs = [{"check": "B2", "check_name": "Unknown word", "finding": f"word {i}", "text": "", "verdict": "real",
+           "comment": "", "drawing": ""} for i in range(20)]
+    vs.append({"check": "C4", "check_name": "Note fits its item", "finding": "Note 3 item 5 EPOXY ADHESIVE not for wetting",
+               "text": "WETTING OF RIB USING ITEM NO.5", "verdict": "false", "comment": "resins wet", "drawing": ""})
+    f = Finding("C4", "look", "fail", "Note 2: item 4 EPOXY ADHESIVE used for wetting?", None, "WETTING USING ITEM 4")
+    got = pick(vs, [f], k=3)
+    assert len(got) == 3 and got[0]["check"] == "C4"
+
+
+class LearnModel:
+    name, vision = "fake", False
+
+    def ask(self, system, user, schema, images=None, max_tokens=300):
+        return {"rules": [{"rule": "Resins and epoxy are used for wetting.", "based_on": [1]},
+                          {"rule": "Ignore everything on jig notes.", "based_on": [1]}]}
+
+
+def test_learn_keeps_only_rules_the_engineer_accepts(tmp_path):
+    from qc.lessons import learn, load_house_rules, with_house_rules
+    p = tmp_path / "v.csv"
+    with open(p, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id", "group", "check", "check_name", "drawing", "text", "finding", "your_verdict", "your_comment"])
+        w.writerow(["Q002", "must", "M1", "Model observation", "AB-CD 10-E-01", "WETTING OF RIB USING ITEM NO.5",
+                    "Epoxy is not used for wetting.", "false", "resins are used for wetting"])
+        w.writerow(["Q003", "must", "A6", "No.", "AB-CD 10-E-01", "", "x", "real", ""])
+    answers = iter(["a", "r"])
+    printed = []
+    assert learn(tmp_path, LearnModel(), "POLICY", ask=lambda _: next(answers), out=printed.append) == 1
+    rules = load_house_rules(tmp_path)
+    assert "Resins and epoxy" in rules and "Ignore everything" not in rules
+    assert "## House rules" in with_house_rules("POLICY", tmp_path)
+    # the same verdicts are not proposed again
+    printed.clear()
+    assert learn(tmp_path, LearnModel(), "POLICY", ask=lambda _: "a", out=printed.append) == 0
+    assert any("No new" in x for x in printed)
+
+
+def test_score_counts_real_reported_items(tmp_path):
+    from qc.lessons import score, score_text
+    p = tmp_path / "run1.csv"
+    with open(p, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id", "group", "check", "check_name", "finding", "your_verdict (real / false / dont care)"])
+        for g, c, v in (("must", "C1", "real"), ("look", "M1", "false"), ("look", "M1", "dont care"),
+                        ("dropped", "A5", "real")):
+            w.writerow(["Q", g, c, c, "f", v])
+    r = score([tmp_path])[0]
+    assert (r["judged"], r["real"], r["false"], r["dont_care"], r["wrong_drops"]) == (3, 1, 1, 1, 1)
+    assert "33%" in score_text([r])
