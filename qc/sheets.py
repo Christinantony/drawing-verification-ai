@@ -321,6 +321,8 @@ def split_notes(q: QCSheet, lines: List[Line], block_index: int, lh: float) -> N
         else:
             cur = Note(None, t, l.bbox, block_index, l.conf)
             q.notes.append(cur)
+    # A "note" with no word in it ('5', 'A') is a stray balloon or zone mark.
+    q.notes = [n for n in q.notes if re.search(r"[A-Za-z]{2,}", n.text)]
 
 
 def taken_boxes(q: QCSheet) -> List[BBox]:

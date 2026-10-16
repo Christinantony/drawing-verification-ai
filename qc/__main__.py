@@ -181,13 +181,18 @@ def review(args) -> int:
         n_changes = sum(len(q.layout["changes"]) + len(q.layout["added"]) for q in sheets)
         log(f"    layout check: {n_changes} change(s), {sum(len(q.layout['disagree']) for q in sheets)} disagreement(s) reported")
 
+    from .pm import resolve as resolve_pm
+    pm_findings = resolve_pm(sheets, client if not args.no_model else NoModel(), log,
+                             vision=bool(steps.get("layout") is not False and getattr(client, "vision", False)
+                                         and not args.no_model))
+
     log("4/8 Map the set")
     smap = SetMap(sheets)
     log(f"    numbering {smap.describe()}; {len(smap.refs)} references")
 
     log("5/8 QC checks (facts)")
     step("checks")
-    findings = run_all(sheets, smap, cfg)
+    findings = run_all(sheets, smap, cfg) + pm_findings
     chk_results, chk_findings = run_checklists(docs, sheets, out_dir, cfg)
     findings += chk_findings
     for c in chk_results:
@@ -218,12 +223,12 @@ def review(args) -> int:
         log(f"7/8 Model decisions under the QC policy" + (f" ({len(examples)} earlier verdicts as examples)" if examples else ""))
         if steps.get("decide"):
             step("decide")
-            decide(findings, sheets, client, policy, examples, cfg, log)
+            decide(findings, sheets, client, policy, examples, cfg, log, smap=smap)
             done("decide")
             log(f"    {sum(f.status == 'dropped' for f in findings)} fact(s) dropped by the model (listed in the report)")
         if steps.get("open_review"):
             step("open_review")
-            extra = open_review(sheets, findings, client, policy, examples, log)
+            extra = open_review(sheets, findings, client, policy, examples, log, smap=smap, cfg=cfg)
             findings += extra
             done("open_review")
             log(f"    open review: {len(extra)} model observation(s)")

@@ -60,15 +60,52 @@ def _examples_text(examples) -> str:
     return "\n\nEarlier verdicts by the engineer (follow the same standard):\n" + "\n".join(lines)
 
 
-def _sheet_context(s) -> str:
+def _today(cfg=None):
+    import datetime as _dt
+    t = (cfg or {}).get("today") or _dt.date.today()
+    return t.strftime("%d/%m/%Y")
+
+
+def _sheet_context(s, smap=None, cfg=None) -> str:
+    """What the model needs to judge this sheet like an engineer who knows the
+    set: drawing type, today's date, what each BOM line refers to (and whether
+    its name matches that drawing's title), what the sub-assemblies contain,
+    and what SEE TABLE points to."""
+    from check_coherence import _titles_agree
     from .checks import drawing_type
     tb = s.record["title_block"]
-    return (f"Drawing {s.number}: '{tb.get('title') or ''}', read by {'OCR' if s.ocr else 'its text layer'}, "
-            f"{len(s.record.get('bom') or [])} BOM rows, {len(s.notes)} notes.")
+    lines = [f"Drawing {s.number}: '{tb.get('title') or ''}' ({drawing_type(s, cfg or {'drawing_types': {}})}), "
+             f"read by {'OCR' if s.ocr else 'its text layer'}, {len(s.record.get('bom') or [])} BOM rows, "
+             f"{len(s.notes)} notes. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."]
+    if smap is not None:
+        refs = {r.where: r for r in smap.of(s) if r.where.startswith("BOM item") and r.targets}
+        for row in s.record.get("bom") or []:
+            where = f"BOM item {row.get('item') or '?'}"
+            r = refs.get(where)
+            if r:
+                t = r.targets[0]
+                title = t.record["title_block"].get("title") or ""
+                ok = _titles_agree(row.get("description") or "", title)
+                lines.append(f"  {where} '{row.get('description')}' refers to drawing {t.number} titled '{title}'"
+                             f" ({'name matches the title' if ok else 'NAME DIFFERS from the title'}).")
+            elif row.get("description"):
+                lines.append(f"  {where} '{row.get('description')}': bought-out / standard part ({row.get('ref') or ''}).")
+        for c in smap.children_of(s)[:6]:
+            parts = ", ".join(f"{r.get('description')}" for r in (c.record.get("bom") or [])[:14] if r.get("description"))
+            if parts:
+                lines.append(f"  Sub-assembly {c.number} ('{c.record['title_block'].get('title')}') contains: {parts}.")
+    if any("SEE TABLE" in (v or "").upper() for v in tb.values()):
+        tables = (["the BOM table (its REF./MATERIAL column)"] if s.record.get("bom") else []) + \
+                 (["a specification table"] if any(b.kind in ("table", "unplaced") for b in s.blocks) else [])
+        lines.append("  SEE TABLE on this sheet refers to: " + (" or ".join(tables) or "no table found") + ".")
+    if getattr(s, "pm", None):
+        lines.append("  Values such as " + ", ".join(p["text"] for p in s.pm[:3]) + " are written with ± on the "
+                     "drawing (the sign is a graphic); read them as value ± tolerance.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-def decide(findings, sheets, client, policy, examples, cfg, log) -> None:
+def decide(findings, sheets, client, policy, examples, cfg, log, smap=None) -> None:
     """Model decides report/drop, severity and wording for every fact."""
     facts = [f for f in findings if f.status in ("fail", "check")]
     by_sheet = {}
@@ -82,7 +119,8 @@ def decide(findings, sheets, client, policy, examples, cfg, log) -> None:
                               f"{'unsure' if f.status == 'check' else 'certain'}] {f.message}"
                               + (f" (where: {f.where})" if f.where else "")
                               for k, f in enumerate(batch))
-            ctx = _sheet_context(sheet) if sheet is not None else "Facts about the whole set."
+            ctx = _sheet_context(sheet, smap, cfg) if sheet is not None else \
+                f"Facts about the whole set. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
             schema = {"type": "object", "properties": {"decisions": {"type": "array", "items": {
                 "type": "object", "properties": {
                     "n": {"type": "integer"},
@@ -108,6 +146,10 @@ def decide(findings, sheets, client, policy, examples, cfg, log) -> None:
                 seen.add(k)
                 f = batch[k]
                 f.rule_severity = f.severity
+                if a["decision"] == "drop" and f.code in (cfg.get("never_drop") or []):
+                    # The policy keeps these for the engineer to decide.
+                    a = dict(a, decision="look")
+                    f.history.append(f"model wanted to drop it ({a.get('reason', '')}); kept for the engineer")
                 if a["decision"] == "drop":
                     f.status = "dropped"
                     f.drop_reason = a.get("reason", "")
@@ -123,7 +165,7 @@ def decide(findings, sheets, client, policy, examples, cfg, log) -> None:
 
 
 # ---------------------------------------------------------------------------
-def open_review(sheets, findings, client, policy, examples, log, max_items=8) -> List[Finding]:
+def open_review(sheets, findings, client, policy, examples, log, max_items=8, smap=None, cfg=None) -> List[Finding]:
     """Model reads a sheet's literal text and reports problems the facts do
     not cover. Each observation must quote text that is on the sheet."""
     out = []
@@ -147,7 +189,7 @@ def open_review(sheets, findings, client, policy, examples, log, max_items=8) ->
                 "quote": {"type": "string"}, "problem": {"type": "string"},
                 "severity": {"type": "string", "enum": ["must", "look"]}},
             "required": ["quote", "problem", "severity"]}}}, "required": ["observations"]}
-        user = (f"QC POLICY:\n{policy}{ex}\n\n{_sheet_context(s)}\nLiteral text of the drawing:\n{text}\n\n"
+        user = (f"QC POLICY:\n{policy}{ex}\n\n{_sheet_context(s, smap, cfg)}\nLiteral text of the drawing:\n{text}\n\n"
                 f"Already reported: {known or 'nothing'}\n\n"
                 f"List up to {max_items} OTHER problems a QA engineer would mark on this drawing's text "
                 "(wrong or inconsistent names, wrong item for a note, unclear or incomplete notes, a "
@@ -159,9 +201,27 @@ def open_review(sheets, findings, client, policy, examples, log, max_items=8) ->
             continue
         rejected = 0
         sheet_alnum = alnum(" ".join(w.text for w in s.sheet.words)) + alnum(text)
+        bom_target = {}
+        if smap is not None:
+            for r in smap.of(s):
+                if r.where.startswith("BOM item") and r.targets:
+                    bom_target[r.where.split()[-1]] = r.targets[0].number
         for o in ans.get("observations", [])[:max_items]:
             q = (o.get("quote") or "").strip()
             if not q or alnum(q) not in sheet_alnum:
+                rejected += 1
+                continue
+            # Two BOM lines that refer to different drawings are different
+            # parts: an observation comparing their names is not a finding.
+            said = q + " " + o.get("problem", "")
+            items = set(re.findall(r"\b(?:BOM\s*)?items?\s*(?:no\.?\s*)?(\d{1,3})\b", said, re.I))
+            said_alnum = alnum(said)
+            for row in s.record.get("bom") or []:   # rows named by their description
+                d = alnum(row.get("description") or "")
+                if len(d) >= 3 and d in said_alnum:
+                    items.add(str(row.get("item")))
+            targets = {bom_target.get(i) for i in items if bom_target.get(i)}
+            if len(items) >= 2 and len(targets) >= 2:
                 rejected += 1
                 continue
             from .checks import locate

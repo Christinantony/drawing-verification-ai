@@ -20,13 +20,16 @@ DEFAULTS = {
     "model_steps": {"layout": True, "judge": True, "doubt": True, "decide": True, "open_review": True,
                     "summary": True},
     "policy_file": None,       # None = qc/policy.md
+    # Facts the model may re-word or re-grade but never drop: the engineer decides.
+    "never_drop": ["A1", "A5", "A6", "B1", "B3", "C1", "C2", "C3", "C5", "C6", "D2", "D6", "E2"],
+    "today": None,             # None = the computer's date (dates on drawings are DD/MM/YYYY)
     "examples": [],            # findings.csv files with your verdicts
     # must = must fix before print; look = please look (the rules' default;
     # with model decisions these are only the starting point).
     "severity": {
         "A1": "must", "A2_missing_balloon": "look", "A2_extra_balloon": "must", "A3": "look", "A4": "look",
         "A5": "must", "A6": "must",
-        "B1": "must", "B2": "must", "B2_unsure": "look", "B3": "look", "B4": "look", "B5": "look",
+        "B1": "must", "B2": "must", "B2_unsure": "look", "B3": "must", "B4": "look", "B5": "look",
         "C1_styled": "must", "C1_missing": "look", "C2": "must", "C3": "must", "C4": "look",
         "C5": "must", "C6": "must", "C7": "look", "C8": "must",
         "D1": "look", "D2": "must", "D3": "look", "D4": "look", "D5": "look",
