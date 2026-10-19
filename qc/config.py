@@ -17,7 +17,7 @@ DEFAULTS = {
         "doubt_passes": 2,
     },
     # Model steps (all on by default; --skip or --decide rules turn them off)
-    "model_steps": {"layout": True, "judge": True, "doubt": True, "decide": True, "open_review": True,
+    "model_steps": {"layout": True, "tb_check": True, "judge": True, "doubt": True, "decide": True, "open_review": True,
                     "summary": True},
     "policy_file": None,       # None = qc/policy.md
     # Facts the model may re-word or re-grade but never drop: the engineer decides.

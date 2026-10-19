@@ -547,3 +547,51 @@ def test_prompt_longer_than_context_is_refused():
     with pytest.raises(ModelError, match="too long"):
         c.ask("s", "x" * 5000, {"type": "object"}, max_tokens=100)
     assert c.too_long == 1
+
+
+class TbModel(FakeModel):
+    def __init__(self, kind="drawing", box_ok=True):
+        super().__init__()
+        self.kind, self.box_ok = kind, box_ok
+
+    def ask(self, system, user, schema, images=None, max_tokens=300):
+        props = schema["properties"]
+        if "box_1_is_title_block" in props:
+            assert images
+            return {"kind": self.kind, "box_1_is_title_block": self.box_ok, "area": "bottom-right"}
+        if "no_cell_for" in props:
+            assert images
+            return {"fields": {"drawing_number": "AB-CD 10-E-02", "title": "BASE PLATE", "scale": "1:1",
+                               "material": "INVENTED ALLOY 123"}, "no_cell_for": ["weight"],
+                    "makes_sense": "fine"}
+        return super().ask(system, user, schema, images, max_tokens)
+
+
+def test_title_block_that_makes_no_sense_is_reread_by_the_model(tmp_path):
+    from qc.tbcheck import reasons, recheck
+    q = _part(tmp_path)[0]
+    cfg = config.load()
+    assert reasons(q, cfg) == []
+    tb = q.record["title_block"]
+    tb.update(drawing_number="", title="", scale="SHEET 1", weight="")
+    assert reasons(q, cfg)
+    assert recheck([q], TbModel(), cfg, lambda *_: None) == 1
+    assert tb["drawing_number"] == "AB-CD 10-E-02" and tb["title"] == "BASE PLATE" and tb["scale"] == "1:1"
+    assert tb["material"] == "AL 6061-T6"                     # invented value is not on the sheet: ignored
+    assert any("not found in the sheet text" in c for c in q.tb_check["changes"])
+    a5 = [f for f in run_all([q], SetMap([q]), cfg) if f.code == "A5"]
+    weight = [f for f in a5 if "WEIGHT" in f.message]
+    assert weight and weight[0].severity == "look" and "no WEIGHT cell" in weight[0].message
+
+
+def test_document_pages_are_not_held_to_a_drawing_title_block(tmp_path):
+    from qc.tbcheck import recheck
+    q = _part(tmp_path)[0]
+    cfg = config.load()
+    q.record["title_block"].update(drawing_number="", title="", material="", weight="", scale="")
+    recheck([q], TbModel(kind="document", box_ok=False), cfg, lambda *_: None)
+    assert q.doc_kind == "document"
+    msgs = [f.message for f in run_all([q], SetMap([q]), cfg) if f.code == "A5"]
+    assert not any(w in m for m in msgs for w in ("MATERIAL", "WEIGHT", "SCALE"))
+    q.page = 2
+    assert not [f for f in run_all([q], SetMap([q]), cfg) if f.code == "A5"]

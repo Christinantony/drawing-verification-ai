@@ -187,6 +187,20 @@ def review(args) -> int:
         n_changes = sum(len(q.layout["changes"]) + len(q.layout["added"]) for q in sheets)
         log(f"    layout check: {n_changes} change(s), {sum(len(q.layout['disagree']) for q in sheets)} disagreement(s) reported")
 
+    from .tbcheck import reasons as tb_reasons, recheck as tb_recheck
+    if steps.get("tb_check") and getattr(client, "vision", False):
+        step("tb_check")
+        n_tb = tb_recheck(sheets, client, cfg, log)
+        done("tb_check")
+        log(f"    title-block check: {n_tb} sheet(s) did not make sense and were re-read by the model")
+    else:
+        for q in sheets:
+            why = tb_reasons(q, cfg)
+            q.tb_check = {"reasons": why, "changes": [], "kind": "drawing", "no_cell_for": [], "note": ""}
+            if why:
+                log(f"    {q.number or q.file}: title block does not make sense ({'; '.join(why)[:110]}) - "
+                    "not re-checked (needs the model with images)")
+
     from .pm import resolve as resolve_pm
     pm_findings = resolve_pm(sheets, client if not args.no_model else NoModel(), log,
                              vision=bool(steps.get("layout") is not False and getattr(client, "vision", False)
@@ -403,7 +417,7 @@ def main(argv=None) -> int:
     r.add_argument("--policy", help="your QC policy document (default qc/policy.md)")
     r.add_argument("--examples", nargs="*", help="findings.csv files with your verdicts, used as examples")
     r.add_argument("--verdicts", help="your verdicts folder (marked findings.csv files + house_rules.md)")
-    r.add_argument("--skip", help="model steps to skip, comma separated: layout,judge,doubt,decide,open_review,summary")
+    r.add_argument("--skip", help="model steps to skip, comma separated: layout,tb_check,judge,doubt,decide,open_review,summary")
     d = sub.add_parser("doctor", help="check the setup: packages, Tesseract, Ollama, the model")
     d.add_argument("--model")
     d.add_argument("--host")

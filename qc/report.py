@@ -230,6 +230,20 @@ It does not check geometry or views. Every item needs an engineer's decision; re
                      + "".join(f"<li>added: {e(x)}</li>" for x in L["added"])
                      + "".join(f"<li>disagrees: {e(x)}</li>" for x in L["disagree"]) + "</ul>")
 
+    # Title-block re-check
+    tbc = [(q, getattr(q, "tb_check", None)) for q in sheets]
+    tbc = [(q, T) for q, T in tbc if T and T.get("reasons")]
+    if tbc:
+        h.append("<h2>Title-block check</h2><p class='meta'>Title blocks whose contents did not make sense. "
+                 "The model looked at the sheet, found the real title block (or a document's header) and read "
+                 "it; a value it read is used only if the same text is on the sheet.</p>")
+        for q, T in tbc:
+            h.append(f"<h3>{e(q.number or q.file)}</h3><ul><li>why: {e('; '.join(T['reasons']))}</li>"
+                     + (f"<li>read as: {e(T['kind'])}</li>" if T.get("kind") != "drawing" else "")
+                     + "".join(f"<li>{e(c)}</li>" for c in T.get("changes", []))
+                     + (f"<li>no cell in this template for: {e(', '.join(T['no_cell_for']))}</li>" if T.get("no_cell_for") else "")
+                     + (f"<li>model: {e(T['note'])}</li>" if T.get("note") else "") + "</ul>")
+
     # Text not placed
     h.append("<h2>Text not placed in a region</h2><p class='meta'>Literal text the agent could not sort into a "
              "title block, BOM, notes, callout, view label or legend. Glance at it; spelling was still checked.</p>")

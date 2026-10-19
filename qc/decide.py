@@ -67,7 +67,10 @@ def _sheet_context(s, smap=None, cfg=None) -> str:
     tb = s.record["title_block"]
     lines = [f"Drawing {s.number}: '{tb.get('title') or ''}' ({drawing_type(s, cfg or {'drawing_types': {}})}), "
              f"read by {'OCR' if s.ocr else 'its text layer'}, {len(s.record.get('bom') or [])} BOM rows, "
-             f"{len(s.notes)} notes. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."]
+             f"{len(s.notes)} notes. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
+             + ("" if s.ocr else " This sheet was NOT read by OCR: never say that OCR may have misread it.")
+             + (" It is a document, not a drawing: drawing title-block fields do not apply."
+                if getattr(s, "doc_kind", "") == "document" else "")]
     if smap is not None:
         refs = {r.where: r for r in smap.of(s) if r.where.startswith("BOM item") and r.targets}
         for row in s.record.get("bom") or []:

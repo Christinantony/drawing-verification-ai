@@ -23,7 +23,7 @@ the agent's behaviour. You don't need to change any code.
 |---|---|---|
 | 1. Intake | Lists the folder: PDFs, Word checklists, unsupported files | code |
 | 2. Read | Text layer if present, else OCR (rotation found automatically) | code |
-| 3. Locate the parts | Boxes the title block, BOM, revision table, every note block, callouts, view labels, legends and balloons. **Layout check:** the model looks at a small image of the sheet with the boxes numbered. It names each box and reports any text block that has no box; the code then boxes it from the words in that area, so the edges stay exact. **± values:** SolidWorks draws the ± of '135 ± 10 g' as a graphic, so the text reads '135 10 g'. The model looks at an image of each such value; with a ±, the text becomes '135±10 g'; without one, it is reported (D6). | code proposes, model judges |
+| 3. Locate the parts | Boxes the title block, BOM, revision table, every note block, callouts, view labels, legends and balloons. **Layout check:** the model looks at a small image of the sheet with the boxes numbered. It names each box and reports any text block that has no box; the code then boxes it from the words in that area, so the edges stay exact. **Title-block check:** if what was read as the title block does not make sense (no drawing number, 3 or more required fields empty, a scale that is not '1:1', a date that is not a date, or the layout check disagrees), the model looks at the whole sheet (drawing or document? where is the real title block?), then reads that area field by field. A value it reads is used only if the same text is on the sheet; fields the template has no cell for are reported once as please look. A document (e.g. a manufacturing document) is held only to number, title, revision and date, on its first page. **± values:** SolidWorks draws the ± of '135 ± 10 g' as a graphic, so the text reads '135 10 g'. The model looks at an image of each such value; with a ±, the text becomes '135±10 g'; without one, it is reported (D6). | code proposes, model judges |
 | 4. Map the set | Learns the numbering (one family per product) and resolves every reference in any text: BOM, NEXT ASSY., notes, USE FILE, jigs/moulds | code |
 | 5. QC checks | The catalogue below produces facts. Spelling, "does this note fit its item" and "are the notes clear" are asked as short questions | code + model |
 | 6. Doubt loop | For facts the code can't settle: the model picks one tool (re-read the box, read an image of the box, search the set, open the linked drawing, hand to you), then the code checks again; at most 2 passes | model chooses, code acts |
@@ -99,7 +99,7 @@ python -m qc layout-test "C:\drawings\project-set\<one sheet>.pdf" --out "C:\qc-
 - `--verdicts`: your verdicts folder (or `"verdicts_dir"` in your settings
   file). See "Teaching the agent" below. `--examples FILE ...` still works
   for single files.
-- `--skip`: turns off model steps (`layout`, `judge`, `doubt`, `decide`,
+- `--skip`: turns off model steps (`layout`, `tb_check`, `judge`, `doubt`, `decide`,
   `open_review`, `summary`) when you need a faster run.
 - `layout-test`: tries both layout approaches on one sheet: (A) the model
   draws its own boxes on the plain image, (B) the model judges the program's

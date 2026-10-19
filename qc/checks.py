@@ -97,7 +97,14 @@ def locate(sheet, text: str) -> Optional[tuple]:
     return best
 
 
+# A document (manufacturing document, list, procedure) has a header, not a
+# drawing title block: it needs a number, a title, a revision and a date.
+DOC_EXEMPT = ["material", "weight", "scale", "size", "sheet", "drawn_by", "checked_by"]
+
+
 def drawing_type(sheet, cfg) -> str:
+    if getattr(sheet, "doc_kind", "") == "document":
+        return "document"
     title = (sheet.record["title_block"].get("title") or "").upper()
     for name, spec in cfg["drawing_types"].items():
         if any(w in title for w in spec["title_words"]):
@@ -218,17 +225,27 @@ def check_A(sheets, smap, cfg) -> List[Finding]:
                                            s, l.text, "view label", l.bbox, related=[psheet]))
         # A5 title block complete
         dtype = drawing_type(s, cfg)
-        exempt = set(cfg["drawing_types"].get(dtype, {}).get("exempt", []))
+        exempt = set(cfg["drawing_types"].get(dtype, {}).get("exempt", []) if dtype != "document" else
+                     cfg["drawing_types"].get("document", {}).get("exempt", DOC_EXEMPT))
         tb = s.record["title_block"]
+        no_cell = set((getattr(s, "tb_check", None) or {}).get("no_cell_for") or [])
+        if dtype == "document" and s.page > 1:
+            no_cell, exempt = set(), set(cfg["required_fields"]) | {"approval"}   # only page 1 has the header
         for f_ in cfg["required_fields"]:
             if f_ in exempt or (tb.get(f_) or "").strip():
                 continue
             label = f_.replace("_by", "").replace("_", " ").upper()
+            if f_ in no_cell:
+                out.append(Finding("A5", "look", "fail",
+                                   f"This title block has no {label} cell at all (seen on the image). Confirm the "
+                                   f"drawing needs none, or use the template that has it.", s, label, "title block",
+                                   s.parts["title_block"].region, history=["title-block re-check by the model"]))
+                continue
             out.append(Finding("A5", _sev(cfg, "A5"), "doubt" if s.ocr else "fail",
                                f"Title block has no {label}" + (" (read by OCR; may be a misread)" if s.ocr else "") + ".",
                                s, label, "title block", s.parts["title_block"].region,
                                doubt={"kind": "tb_field", "field": f_, "label": label}))
-        if not any((tb.get(f_) or "").strip() for f_ in cfg["approval_fields"]):
+        if "approval" not in exempt and not any((tb.get(f_) or "").strip() for f_ in cfg["approval_fields"]):
             out.append(Finding("A5", _sev(cfg, "A5"), "doubt" if s.ocr else "fail",
                                "Title block has no APPROVED / VERIFIED signature.", s, "APPROVED", "title block",
                                s.parts["title_block"].region))
