@@ -23,6 +23,7 @@ class Client:
     def __init__(self, name="gemma4:26b", host="http://localhost:11434", context=8192, seconds=300):
         self.name, self.host, self.context, self.seconds = name, host.rstrip("/"), context, seconds
         self.calls, self.metrics = 0, []
+        self.too_long = 0          # prompts that did not fit the context window
         self._caps = None
 
     # -- setup ----------------------------------------------------------------
@@ -47,6 +48,13 @@ class Client:
 
     # -- calls ------------------------------------------------------------------
     def ask(self, system: str, user: str, schema: dict, images=None, max_tokens: int = 300) -> dict:
+        # A prompt longer than the context window is cut by Ollama without an
+        # error (the start, with the policy, is lost). Refuse it instead.
+        est = (len(system) + len(user)) / 3.6 + 300 * len(images or [])
+        if est + max_tokens > self.context:
+            self.too_long += 1
+            raise ModelError(f"prompt too long for the context window (about {int(est)} + {max_tokens} tokens "
+                             f"of {self.context}); raise \"context\" in the settings")
         msg = {"role": "user", "content": user}
         if images:
             msg["images"] = [_png_b64(i) for i in images]
@@ -65,6 +73,10 @@ class Client:
         self.metrics.append({k: data.get(k) for k in ("prompt_eval_count", "eval_count", "total_duration",
                                                       "prompt_eval_duration", "eval_duration")}
                             | {"seconds": round(time.monotonic() - t, 1)})
+        if (data.get("prompt_eval_count") or 0) + max_tokens > self.context:
+            self.too_long += 1
+            raise ModelError(f"prompt filled the context window ({data.get('prompt_eval_count')} tokens of "
+                             f"{self.context}); raise \"context\" in the settings")
         if data.get("done_reason") == "length":
             raise ModelError("answer cut off by the output limit")
         text = (data.get("message") or {}).get("content") or ""
@@ -79,7 +91,7 @@ class Client:
         pd = sum(m.get("prompt_eval_duration") or 0 for m in self.metrics) / 1e9
         ec = sum(m.get("eval_count") or 0 for m in self.metrics)
         ed = sum(m.get("eval_duration") or 0 for m in self.metrics) / 1e9
-        return {"calls": self.calls, "prompt_tok_s": round(pe / pd, 1) if pd else None,
+        return {"calls": self.calls, "too_long": self.too_long, "prompt_tok_s": round(pe / pd, 1) if pd else None,
                 "output_tok_s": round(ec / ed, 1) if ed else None,
                 "seconds": round(sum(m["seconds"] for m in self.metrics), 1)}
 

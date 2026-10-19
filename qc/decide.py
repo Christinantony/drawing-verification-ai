@@ -47,7 +47,8 @@ def _examples_text(examples) -> str:
         return ""
     lines = [f"- {e.get('check_name') or e['check']}: \"{e['finding'][:120]}\" -> engineer said: {e['verdict']}"
              + (f" ({e['comment'][:80]})" if e.get("comment") else "") for e in examples]
-    return "\n\nEarlier verdicts by the engineer (follow the same standard):\n" + "\n".join(lines)
+    return ("\n\nEarlier verdicts by the engineer (follow the same standard; 'false' means that kind of report was "
+            "wrong, not that nothing should be reported):\n" + "\n".join(lines))
 
 
 def _today(cfg=None):
@@ -102,57 +103,66 @@ def decide(findings, sheets, client, policy, examples, cfg, log, smap=None) -> N
     for f in facts:
         by_sheet.setdefault(id(f.sheet), (f.sheet, []))[1].append(f)
     from .lessons import pick
-    for sheet, fs in by_sheet.values():
-        for i in range(0, len(fs), 12):
-            batch = fs[i:i + 12]
-            ex = _examples_text(pick(examples, batch, sheet, smap))
-            lines = "\n".join(f"{k + 1}. [{f.code} {f.name}; rule says {f.severity}; "
-                              f"{'unsure' if f.status == 'check' else 'certain'}] {f.message}"
-                              + (f" (where: {f.where})" if f.where else "")
-                              for k, f in enumerate(batch))
-            ctx = _sheet_context(sheet, smap, cfg) if sheet is not None else \
-                f"Facts about the whole set. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
-            schema = {"type": "object", "properties": {"decisions": {"type": "array", "items": {
-                "type": "object", "properties": {
-                    "n": {"type": "integer"},
-                    "decision": {"type": "string", "enum": ["must", "look", "drop"]},
-                    "wording": {"type": "string"},
-                    "reason": {"type": "string"}},
-                "required": ["n", "decision", "wording"]}}}, "required": ["decisions"]}
-            user = (f"QC POLICY:\n{policy}{ex}\n\n{ctx}\n\nFacts found by exact checking:\n{lines}\n\n"
-                    "For EVERY fact decide must, look or drop under the policy. Word it for the engineer "
-                    "(at most 30 words). Give a reason (at most 15 words).")
-            try:
-                ans = client.ask(SYSTEM, user, schema, max_tokens=80 + 70 * len(batch))
-            except ModelError as e:
-                log(f"    decisions not made for {sheet.number if sheet else 'the set'}: {e}")
-                for f in batch:
-                    f.history.append("decision: rule default (model call failed)")
+
+    def one(sheet, batch):
+        ex = _examples_text(pick(examples, batch, sheet, smap))
+        lines = "\n".join(f"{k + 1}. [{f.code} {f.name}; rule says {f.severity}; "
+                          f"{'unsure' if f.status == 'check' else 'certain'}] {f.message}"
+                          + (f" (where: {f.where})" if f.where else "")
+                          for k, f in enumerate(batch))
+        ctx = _sheet_context(sheet, smap, cfg) if sheet is not None else \
+            f"Facts about the whole set. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
+        schema = {"type": "object", "properties": {"decisions": {"type": "array", "items": {
+            "type": "object", "properties": {
+                "n": {"type": "integer"},
+                "decision": {"type": "string", "enum": ["must", "look", "drop"]},
+                "wording": {"type": "string"},
+                "reason": {"type": "string"}},
+            "required": ["n", "decision", "wording"]}}}, "required": ["decisions"]}
+        user = (f"QC POLICY:\n{policy}{ex}\n\n{ctx}\n\nFacts found by exact checking:\n{lines}\n\n"
+                "For EVERY fact decide must, look or drop under the policy. Word it for the engineer "
+                "(at most 30 words). Give a reason (at most 10 words).")
+        try:
+            ans = client.ask(SYSTEM, user, schema, max_tokens=120 + 140 * len(batch))
+        except ModelError as e:
+            if ("cut off" in str(e) or "too long" in str(e) or "filled the context" in str(e)) and len(batch) > 1:
+                # the answer did not fit: ask again in two halves
+                h = len(batch) // 2
+                one(sheet, batch[:h])
+                one(sheet, batch[h:])
+                return
+            log(f"    decisions not made for {sheet.number if sheet else 'the set'}: {e}")
+            for f in batch:
+                f.history.append("decision: rule default (model call failed)")
+            return
+        seen = set()
+        for a in ans.get("decisions", []):
+            k = a.get("n", 0) - 1
+            if not 0 <= k < len(batch) or k in seen:
                 continue
-            seen = set()
-            for a in ans.get("decisions", []):
-                k = a.get("n", 0) - 1
-                if not 0 <= k < len(batch) or k in seen:
-                    continue
-                seen.add(k)
-                f = batch[k]
-                f.rule_severity = f.severity
-                if a["decision"] == "drop" and f.code in (cfg.get("never_drop") or []):
-                    # The policy keeps these for the engineer to decide.
-                    a = dict(a, decision="look")
-                    f.history.append(f"model wanted to drop it ({a.get('reason', '')}); kept for the engineer")
-                if a["decision"] == "drop":
-                    f.status = "dropped"
-                    f.drop_reason = a.get("reason", "")
-                else:
-                    f.severity = a["decision"]
-                    if a.get("wording", "").strip():
-                        f.rule_message = f.message
-                        f.message = a["wording"].strip()
-                f.history.append(f"decision: {a['decision']} - {a.get('reason', '')}")
-            for k, f in enumerate(batch):
-                if k not in seen:
-                    f.history.append("decision: rule default (model gave no answer)")
+            seen.add(k)
+            f = batch[k]
+            f.rule_severity = f.severity
+            if a["decision"] == "drop" and f.code in (cfg.get("never_drop") or []):
+                # The policy keeps these for the engineer to decide.
+                a = dict(a, decision="look")
+                f.history.append(f"model wanted to drop it ({a.get('reason', '')}); kept for the engineer")
+            if a["decision"] == "drop":
+                f.status = "dropped"
+                f.drop_reason = a.get("reason", "")
+            else:
+                f.severity = a["decision"]
+                if a.get("wording", "").strip():
+                    f.rule_message = f.message
+                    f.message = a["wording"].strip()
+            f.history.append(f"decision: {a['decision']} - {a.get('reason', '')}")
+        for k, f in enumerate(batch):
+            if k not in seen:
+                f.history.append("decision: rule default (model gave no answer)")
+
+    for sheet, fs in by_sheet.values():
+        for i in range(0, len(fs), 8):
+            one(sheet, fs[i:i + 8])
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +195,9 @@ def open_review(sheets, findings, client, policy, examples, log, max_items=8, sm
         user = (f"QC POLICY:\n{policy}{ex}\n\n{_sheet_context(s, smap, cfg)}\nLiteral text of the drawing:\n{text}\n\n"
                 f"Already reported: {known or 'nothing'}\n\n"
                 f"List up to {max_items} OTHER problems a QA engineer would mark on this drawing's text "
-                "(wrong or inconsistent names, wrong item for a note, unclear or incomplete notes, a "
-                "title-block value that cannot be right). Quote the exact text. Empty list if none.")
+                "(a note naming a part differently from its exact BOM name, a wrong item for a note, a "
+                "misspelt word, an unclear or incomplete note, a title-block value that cannot be right). "
+                "Quote the exact text. Follow the policy and house rules; empty list only if the text is clean.")
         try:
             ans = client.ask(SYSTEM, user, schema, max_tokens=100 + 80 * max_items)
         except ModelError as e:

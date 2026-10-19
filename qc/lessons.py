@@ -200,15 +200,22 @@ def pick(verdicts, facts=(), sheet=None, smap=None, k=10, codes=None) -> List[di
         return s
 
     ranked = sorted(enumerate(verdicts), key=lambda iv: (-score(iv[1]), -iv[0]))
-    out, seen = [], set()
+    uniq, seen = [], set()
     for _, v in ranked:
         sig = (v["check"], v["finding"][:80], v["verdict"])
-        if sig in seen:
-            continue
-        seen.add(sig)
-        out.append(v)
-        if len(out) == k:
-            break
+        if sig not in seen:
+            seen.add(sig)
+            uniq.append(v)
+    out = uniq[:k]
+    # Keep a balance: if every example says "false", the model learns to
+    # report nothing at all. At least a third are real ones, when there are.
+    want = min(k // 3, sum(v["verdict"] == "real" for v in uniq))
+    have = sum(v["verdict"] == "real" for v in out)
+    if have < want:
+        extra = [v for v in uniq[k:] if v["verdict"] == "real"][:want - have]
+        keep = [v for v in out if v["verdict"] == "real"]
+        rest = [v for v in out if v["verdict"] != "real"][:k - len(keep) - len(extra)]
+        out = sorted(keep + rest + extra, key=uniq.index)
     return out
 
 

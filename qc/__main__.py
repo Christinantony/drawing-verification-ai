@@ -156,7 +156,11 @@ def review(args) -> int:
 
     log("1/8 Intake")
     pdfs, docs, unsupported = intake(folder)
-    log(f"    {len(pdfs)} PDF(s), {len(docs)} Word file(s)" + (f", {len(unsupported)} not supported: {', '.join(unsupported)}" if unsupported else ""))
+    if unsupported:
+        from collections import Counter
+        kinds = Counter((Path(n).suffix.lower() or "(no extension)") for n in unsupported)
+        skipped = ", ".join(f"{n} {k}" for k, n in kinds.most_common())
+    log(f"    {len(pdfs)} PDF(s), {len(docs)} Word file(s)" + (f"; skipped {len(unsupported)} other file(s): {skipped}" if unsupported else ""))
     if not pdfs:
         log("No PDF drawings in the folder.")
         return 3
@@ -270,6 +274,9 @@ def review(args) -> int:
     log(f"\n{must} must fix, {look} please look, {check} check by hand  ({run['seconds']} s)")
     if timing:
         log("    time: " + ", ".join(f"{k} {v} s" for k, v in timing.items() if isinstance(v, float)))
+    if sp.get("too_long"):
+        log(f"    note: {sp['too_long']} model call(s) did not fit the context window ({cfg['model']['context']} tokens). "
+            f"Set \"model\": {{\"context\": 16384}} in your settings file (uses about 2 GB more RAM).")
     log(f"Report: {path}")
     return 1 if must else 0
 

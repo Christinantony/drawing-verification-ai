@@ -509,3 +509,41 @@ def test_score_counts_real_reported_items(tmp_path):
     r = score([tmp_path])[0]
     assert (r["judged"], r["real"], r["false"], r["dont_care"], r["wrong_drops"]) == (3, 1, 1, 1, 1)
     assert "33%" in score_text([r])
+
+
+def test_decisions_retry_in_halves_when_the_answer_is_cut_off(qcset):
+    from qc.model import ModelError
+    _, sheets, smap = qcset
+    fs = [f for f in run_all(sheets, smap, config.load()) if f.status == "fail" and f.sheet is sheets[0]][:4]
+    assert len(fs) >= 2
+
+    class Cut(PolicyModel):
+        def ask(self, system, user, schema, images=None, max_tokens=300):
+            if "decisions" in schema["properties"]:
+                import re as _re
+                n = sum(1 for line in user.splitlines() if _re.match(r"\d+\. \[", line))
+                if n > 1:
+                    raise ModelError("answer cut off by the output limit")
+                return {"decisions": [{"n": 1, "decision": "look", "wording": "ok", "reason": "r"}]}
+            return super().ask(system, user, schema, images, max_tokens)
+    decide(fs, sheets, Cut(), load_policy(None), [], config.load(), lambda *_: None, smap=smap)
+    assert all(f.message == "ok" for f in fs)
+
+
+def test_examples_keep_some_real_verdicts():
+    from qc.lessons import pick
+    vs = [{"check": "M1", "check_name": "Model observation", "finding": f"obs {i}", "text": "", "verdict": "false",
+           "comment": "no", "drawing": ""} for i in range(15)]
+    vs += [{"check": "C7", "check_name": "Jig", "finding": "jig", "text": "", "verdict": "real", "comment": "",
+            "drawing": ""}, {"check": "B3", "check_name": "Spelt", "finding": "two ways", "text": "", "verdict": "real",
+                             "comment": "", "drawing": ""}]
+    got = pick(vs, [], codes={"M1"}, k=6)
+    assert len(got) == 6 and sum(v["verdict"] == "real" for v in got) == 2
+
+
+def test_prompt_longer_than_context_is_refused():
+    from qc.model import Client, ModelError
+    c = Client(context=1000)
+    with pytest.raises(ModelError, match="too long"):
+        c.ask("s", "x" * 5000, {"type": "object"}, max_tokens=100)
+    assert c.too_long == 1
