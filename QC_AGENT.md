@@ -23,11 +23,11 @@ the agent's behaviour. You don't need to change any code.
 |---|---|---|
 | 1. Intake | Lists the folder: PDFs, Word checklists, unsupported files | code |
 | 2. Read | Text layer if present, else OCR (rotation found automatically) | code |
-| 3. Locate the parts | Boxes the title block, BOM, revision table, every note block, callouts, view labels, legends and balloons. **Layout check:** the model looks at a small image of the sheet with the boxes numbered. It names each box and reports any text block that has no box; the code then boxes it from the words in that area, so the edges stay exact. **± values:** SolidWorks draws the ± of '135 ± 10 g' as a graphic, so the text reads '135 10 g'. The model looks at an image of each such value; with a ±, the text becomes '135±10 g'; without one, it is reported (D6). | code proposes, model judges |
+| 3. Locate the parts | **Ruled tables** (a specification table on an installation drawing, a template list) are read cell by cell from the ruling lines - the PDF's own lines on a text-layer sheet, the lines found in the image on a scanned sheet - so a value stays with its label and a two-line cell stays one value; a field given in such a table (WEIGHT) counts for the title block. A table the lines cannot settle (faint scan, no borders) is read by the model on a sharp image and used only if its cells match the sheet's text. Notes: a note number is '1.' followed by a word ('1.8:1' is a value), a line joins a note only if it starts under that note's text, a legend line ("'*' - KEY CHARACTERISTICS") is a legend, and a mark like 'CL 5.0' is not a note. Boxes the title block, BOM, revision table, every note block, callouts, view labels, legends and balloons. **Layout check:** the model looks at a small image of the sheet with the boxes numbered. It names each box and reports any text block that has no box; the code then boxes it from the words in that area, so the edges stay exact. **Title-block check:** if what was read as the title block does not make sense (no drawing number, 3 or more required fields empty, a scale that is not '1:1', a date that is not a date, or the layout check disagrees), the model looks at the whole sheet (drawing or document? where is the real title block?), then reads that area field by field. A value it reads is used only if the same text is on the sheet; fields the template has no cell for are reported once as please look. A document (e.g. a manufacturing document) is held only to number, title, revision and date, on its first page. **± values:** SolidWorks draws the ± of '135 ± 10 g' as a graphic, so the text reads '135 10 g'. The model looks at an image of each such value; with a ±, the text becomes '135±10 g'; without one, it is reported (D6). | code proposes, model judges |
 | 4. Map the set | Learns the numbering (one family per product) and resolves every reference in any text: BOM, NEXT ASSY., notes, USE FILE, jigs/moulds | code |
 | 5. QC checks | The catalogue below produces facts. Spelling, "does this note fit its item" and "are the notes clear" are asked as short questions | code + model |
 | 6. Doubt loop | For facts the code can't settle: the model picks one tool (re-read the box, read an image of the box, search the set, open the linked drawing, hand to you), then the code checks again; at most 2 passes | model chooses, code acts |
-| 7. Decisions | Under your QC policy, the model decides for every fact: must / look / drop, plus the wording. It then does an **open review** of each sheet's text for problems no rule covers, and **drafts the review summary** | model |
+| 7. Decisions | Under your QC policy, the model decides for every fact: must / look / drop, plus the wording. It then does an **open review** of each sheet's text for problems no rule covers. **Second look:** before a note is reported as incomplete or unclear, a legend as missing, or a model observation is reported, the model looks at a sharp image of that spot (with its table row or the lines around it) and confirms or withdraws it; on a scanned sheet it also reads the text on the image, so a finding caused by an OCR misread is cleared. Then it **drafts the review summary** | model |
 | 8. Report | `report.html` with a crop for every item, `findings.csv` for your verdicts | code |
 
 **Guardrails** (generic, not QC rules):
@@ -89,16 +89,17 @@ into memory, which can take a minute.
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out"
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --decide rules   # the rules decide (comparison)
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --no-model       # no model at all, about 2 min
-python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --examples "C:\qc-out\<run>\findings.csv"
+python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --verdicts "C:\qc-verdicts"   # learn from your verdicts
+python -m qc learn --verdicts "C:\qc-verdicts"     # turn your false verdicts into house rules (you approve each)
+python -m qc score --verdicts "C:\qc-verdicts"     # how many reported items were real, run by run
 python -m qc review "C:\drawings\project-set" --out "C:\qc-out" --skip layout,open_review
 python -m qc layout-test "C:\drawings\project-set\<one sheet>.pdf" --out "C:\qc-out"
 ```
 
-- `--examples`: earlier `findings.csv` files with your verdicts. They are
-  shown to the model as examples of your standard. This is the feedback loop:
-  the more sheets you mark, the closer the model gets to your judgement,
-  without retraining and without new code.
-- `--skip`: turns off model steps (`layout`, `judge`, `doubt`, `decide`,
+- `--verdicts`: your verdicts folder (or `"verdicts_dir"` in your settings
+  file). See "Teaching the agent" below. `--examples FILE ...` still works
+  for single files.
+- `--skip`: turns off model steps (`layout`, `tb_check`, `second_look`, `judge`, `doubt`, `decide`,
   `open_review`, `summary`) when you need a faster run.
 - `layout-test`: tries both layout approaches on one sheet: (A) the model
   draws its own boxes on the plain image, (B) the model judges the program's
@@ -115,14 +116,48 @@ Output, in `<out>\<date-time>\`:
   checked
 - `findings.csv`: one row per item, including the items the model dropped.
   `rule_said` and `model_said` show both decisions side by side. Mark each row
-  real / false / don't care in `your_verdict`. Pass the file back with
-  `--examples` on the next run.
+  real / false / don't care in `your_verdict`, or use the buttons in the
+  report (below).
 - `checklists\*_completed.docx`: checklist copies with empty tolerance cells
   filled (yellow = read from the drawing, orange = please confirm). Rows are
   never added and filled cells are never changed.
 - `<out>\latest.txt`: the path of the newest report.
 
 Exit code: 0 = no must-fix item, 1 = must-fix items, 3 = setup problem.
+
+## Teaching the agent (the lessons library)
+
+The model is not retrained. It learns from your verdicts, which stay on your
+PC in one folder, e.g. `C:\qc-verdicts`:
+
+1. **Mark the report.** Every item in `report.html` has *Real / False /
+   Don't care* buttons and a comment box ("why?"). The marks are kept in the
+   browser while you work. **Save verdicts** downloads
+   `verdicts_<run>.csv`; move it into your verdicts folder. Marking the CSV by
+   hand works too.
+2. **Silence list (exact, no model).** On the next run, a finding you marked
+   false or don't care is not reported again when the same check finds the
+   same text in the **same product family**. It is listed under "Silenced by
+   your earlier verdicts" with your date and comment. Mark it Real to bring it
+   back. Checks that are never dropped (`never_drop`: missing title-block
+   fields, wrong references, spelling two ways, ...) are not silenced; they
+   become please look and say why.
+3. **Relevant examples (model).** Each batch of facts is shown the 10 earlier
+   verdicts most like it: same check, similar words, same product family.
+   All your verdicts are kept, not only the first few.
+4. **House rules (model, approved by you).** `python -m qc learn` asks the
+   model to turn your new false verdicts into general rules, e.g. "A BOM row
+   may name a multi-coat paint system". For each one you answer
+   accept / edit / reject / skip. Accepted rules go into
+   `house_rules.md` in your verdicts folder and are read next to the QC
+   policy on every run. Edit or delete lines in that file freely. A verdict is
+   proposed only once (`learnt.json` remembers).
+5. **Score.** `python -m qc score` prints, per marked run, how many reported
+   items were real and how many drops were wrong, and per check over all
+   runs. The report shows the last marked run's figure.
+
+Comments teach the most: "PCB-A is a different part (other drawing)" lets
+`learn` write a rule; a bare "false" only silences that one finding.
 
 ## Your QC policy and settings
 

@@ -33,31 +33,22 @@ def load_policy(path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def load_examples(paths, limit=12) -> List[dict]:
-    """Earlier verdicts from findings.csv files: the user's 'house standard'."""
-    out = []
-    for p in paths or []:
-        try:
-            with open(p, encoding="utf-8-sig") as fh:
-                for row in csv.DictReader(fh):
-                    v = (row.get("your_verdict (real / false / dont care)") or row.get("your_verdict") or "").strip().lower()
-                    if v in ("real", "false", "dont care", "don't care"):
-                        out.append({"check": row.get("check_name") or row.get("check"), "text": row.get("text", ""),
-                                    "finding": row.get("finding", ""), "verdict": v,
-                                    "comment": row.get("your_comment", "")})
-        except OSError:
-            continue
-    # keep a mix: false and don't-care verdicts teach the most
-    out.sort(key=lambda e: e["verdict"] == "real")
-    return out[:limit]
+def load_examples(paths, limit=None) -> List[dict]:
+    """Earlier verdicts from findings.csv files (files or folders): the
+    user's 'house standard'. All are kept; each batch is shown the ones most
+    like it (lessons.pick)."""
+    from .lessons import read_verdicts
+    out = read_verdicts(paths)
+    return out[-limit:] if limit else out
 
 
 def _examples_text(examples) -> str:
     if not examples:
         return ""
-    lines = [f"- {e['check']}: \"{e['finding'][:120]}\" -> engineer said: {e['verdict']}"
+    lines = [f"- {e.get('check_name') or e['check']}: \"{e['finding'][:120]}\" -> engineer said: {e['verdict']}"
              + (f" ({e['comment'][:80]})" if e.get("comment") else "") for e in examples]
-    return "\n\nEarlier verdicts by the engineer (follow the same standard):\n" + "\n".join(lines)
+    return ("\n\nEarlier verdicts by the engineer (follow the same standard; 'false' means that kind of report was "
+            "wrong, not that nothing should be reported):\n" + "\n".join(lines))
 
 
 def _today(cfg=None):
@@ -76,7 +67,10 @@ def _sheet_context(s, smap=None, cfg=None) -> str:
     tb = s.record["title_block"]
     lines = [f"Drawing {s.number}: '{tb.get('title') or ''}' ({drawing_type(s, cfg or {'drawing_types': {}})}), "
              f"read by {'OCR' if s.ocr else 'its text layer'}, {len(s.record.get('bom') or [])} BOM rows, "
-             f"{len(s.notes)} notes. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."]
+             f"{len(s.notes)} notes. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
+             + ("" if s.ocr else " This sheet was NOT read by OCR: never say that OCR may have misread it.")
+             + (" It is a document, not a drawing: drawing title-block fields do not apply."
+                if getattr(s, "doc_kind", "") == "document" else "")]
     if smap is not None:
         refs = {r.where: r for r in smap.of(s) if r.where.startswith("BOM item") and r.targets}
         for row in s.record.get("bom") or []:
@@ -98,6 +92,14 @@ def _sheet_context(s, smap=None, cfg=None) -> str:
         tables = (["the BOM table (its REF./MATERIAL column)"] if s.record.get("bom") else []) + \
                  (["a specification table"] if any(b.kind in ("table", "unplaced") for b in s.blocks) else [])
         lines.append("  SEE TABLE on this sheet refers to: " + (" or ".join(tables) or "no table found") + ".")
+    for t in (s.record.get("tables") or [])[:3]:
+        rows = [" | ".join(c for c in row if c) for row in (t.get("rows") or [])][:12]
+        if rows:
+            lines.append("  A ruled table on this sheet (each row: its cells, left to right; a cell's lines are "
+                         "joined): " + " // ".join(rows) + ".")
+    leg = (cfg or {}).get("legends") or {}
+    if leg:
+        lines.append("  Marks on dimensions: " + "; ".join(f"'{k}' = {v}" for k, v in leg.items()) + ".")
     if getattr(s, "pm", None):
         lines.append("  Values such as " + ", ".join(p["text"] for p in s.pm[:3]) + " are written with ± on the "
                      "drawing (the sign is a graphic); read them as value ± tolerance.")
@@ -111,66 +113,78 @@ def decide(findings, sheets, client, policy, examples, cfg, log, smap=None) -> N
     by_sheet = {}
     for f in facts:
         by_sheet.setdefault(id(f.sheet), (f.sheet, []))[1].append(f)
-    ex = _examples_text(examples)
-    for sheet, fs in by_sheet.values():
-        for i in range(0, len(fs), 12):
-            batch = fs[i:i + 12]
-            lines = "\n".join(f"{k + 1}. [{f.code} {f.name}; rule says {f.severity}; "
-                              f"{'unsure' if f.status == 'check' else 'certain'}] {f.message}"
-                              + (f" (where: {f.where})" if f.where else "")
-                              for k, f in enumerate(batch))
-            ctx = _sheet_context(sheet, smap, cfg) if sheet is not None else \
-                f"Facts about the whole set. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
-            schema = {"type": "object", "properties": {"decisions": {"type": "array", "items": {
-                "type": "object", "properties": {
-                    "n": {"type": "integer"},
-                    "decision": {"type": "string", "enum": ["must", "look", "drop"]},
-                    "wording": {"type": "string"},
-                    "reason": {"type": "string"}},
-                "required": ["n", "decision", "wording"]}}}, "required": ["decisions"]}
-            user = (f"QC POLICY:\n{policy}{ex}\n\n{ctx}\n\nFacts found by exact checking:\n{lines}\n\n"
-                    "For EVERY fact decide must, look or drop under the policy. Word it for the engineer "
-                    "(at most 30 words). Give a reason (at most 15 words).")
-            try:
-                ans = client.ask(SYSTEM, user, schema, max_tokens=80 + 70 * len(batch))
-            except ModelError as e:
-                log(f"    decisions not made for {sheet.number if sheet else 'the set'}: {e}")
-                for f in batch:
-                    f.history.append("decision: rule default (model call failed)")
+    from .lessons import pick
+
+    def one(sheet, batch):
+        ex = _examples_text(pick(examples, batch, sheet, smap))
+        lines = "\n".join(f"{k + 1}. [{f.code} {f.name}; rule says {f.severity}; "
+                          f"{'unsure' if f.status == 'check' else 'certain'}] {f.message}"
+                          + (f" (where: {f.where})" if f.where else "")
+                          for k, f in enumerate(batch))
+        ctx = _sheet_context(sheet, smap, cfg) if sheet is not None else \
+            f"Facts about the whole set. Today's date is {_today(cfg)}; dates are DD/MM/YYYY."
+        schema = {"type": "object", "properties": {"decisions": {"type": "array", "items": {
+            "type": "object", "properties": {
+                "n": {"type": "integer"},
+                "decision": {"type": "string", "enum": ["must", "look", "drop"]},
+                "wording": {"type": "string"},
+                "reason": {"type": "string"}},
+            "required": ["n", "decision", "wording"]}}}, "required": ["decisions"]}
+        user = (f"QC POLICY:\n{policy}{ex}\n\n{ctx}\n\nFacts found by exact checking:\n{lines}\n\n"
+                "For EVERY fact decide must, look or drop under the policy. Word it for the engineer "
+                "(at most 30 words). Give a reason (at most 10 words).")
+        try:
+            ans = client.ask(SYSTEM, user, schema, max_tokens=120 + 140 * len(batch))
+        except ModelError as e:
+            if ("cut off" in str(e) or "too long" in str(e) or "filled the context" in str(e)) and len(batch) > 1:
+                # the answer did not fit: ask again in two halves
+                h = len(batch) // 2
+                one(sheet, batch[:h])
+                one(sheet, batch[h:])
+                return
+            log(f"    decisions not made for {sheet.number if sheet else 'the set'}: {e}")
+            for f in batch:
+                f.history.append("decision: rule default (model call failed)")
+            return
+        seen = set()
+        for a in ans.get("decisions", []):
+            k = a.get("n", 0) - 1
+            if not 0 <= k < len(batch) or k in seen:
                 continue
-            seen = set()
-            for a in ans.get("decisions", []):
-                k = a.get("n", 0) - 1
-                if not 0 <= k < len(batch) or k in seen:
-                    continue
-                seen.add(k)
-                f = batch[k]
-                f.rule_severity = f.severity
-                if a["decision"] == "drop" and f.code in (cfg.get("never_drop") or []):
-                    # The policy keeps these for the engineer to decide.
-                    a = dict(a, decision="look")
-                    f.history.append(f"model wanted to drop it ({a.get('reason', '')}); kept for the engineer")
-                if a["decision"] == "drop":
-                    f.status = "dropped"
-                    f.drop_reason = a.get("reason", "")
-                else:
-                    f.severity = a["decision"]
-                    if a.get("wording", "").strip():
-                        f.rule_message = f.message
-                        f.message = a["wording"].strip()
-                f.history.append(f"decision: {a['decision']} - {a.get('reason', '')}")
-            for k, f in enumerate(batch):
-                if k not in seen:
-                    f.history.append("decision: rule default (model gave no answer)")
+            seen.add(k)
+            f = batch[k]
+            f.rule_severity = f.severity
+            if a["decision"] == "drop" and f.code in (cfg.get("never_drop") or []):
+                # The policy keeps these for the engineer to decide.
+                a = dict(a, decision="look")
+                f.history.append(f"model wanted to drop it ({a.get('reason', '')}); kept for the engineer")
+            if a["decision"] == "drop":
+                f.status = "dropped"
+                f.drop_reason = a.get("reason", "")
+            else:
+                f.severity = a["decision"]
+                if a.get("wording", "").strip():
+                    f.rule_message = f.message
+                    f.message = a["wording"].strip()
+            f.history.append(f"decision: {a['decision']} - {a.get('reason', '')}")
+        for k, f in enumerate(batch):
+            if k not in seen:
+                f.history.append("decision: rule default (model gave no answer)")
+
+    for sheet, fs in by_sheet.values():
+        for i in range(0, len(fs), 8):
+            one(sheet, fs[i:i + 8])
 
 
 # ---------------------------------------------------------------------------
 def open_review(sheets, findings, client, policy, examples, log, max_items=8, smap=None, cfg=None) -> List[Finding]:
     """Model reads a sheet's literal text and reports problems the facts do
     not cover. Each observation must quote text that is on the sheet."""
+    from .lessons import pick
     out = []
-    ex = _examples_text(examples)
     for s in sheets:
+        mine = [f for f in findings if f.sheet is s and f.status in ("fail", "check")]
+        ex = _examples_text(pick(examples, mine, s, smap, codes={"M1"}))
         parts = []
         tb = s.record["title_block"]
         parts.append("TITLE BLOCK: " + "; ".join(f"{k.upper()}={v}" for k, v in tb.items() if v))
@@ -178,8 +192,13 @@ def open_review(sheets, findings, client, policy, examples, log, max_items=8, sm
             parts.append(f"BOM {r.get('item') or '?'}: {r.get('description') or ''} | QTY {r.get('qty') or ''} | {r.get('ref') or ''}")
         for i, n in enumerate(s.notes, 1):
             parts.append(f"NOTE {n.number or i}: {n.text}")
+        for t in s.record.get("tables") or []:
+            for row in t.get("rows") or []:
+                if any(row):
+                    parts.append("TABLE ROW: " + " | ".join(c for c in row if c))
         for b in s.blocks:
-            if b.kind in ("view_label", "legend", "callout", "unplaced", "annotation"):
+            if b.kind in ("view_label", "legend", "callout", "unplaced", "annotation") or \
+                    (b.kind == "table" and "rows" not in b.meta):
                 for l in b.lines:
                     parts.append(f"{b.kind.upper().replace('_', ' ')}: {l.text}")
         text = "\n".join(parts)[:3500]
@@ -192,8 +211,9 @@ def open_review(sheets, findings, client, policy, examples, log, max_items=8, sm
         user = (f"QC POLICY:\n{policy}{ex}\n\n{_sheet_context(s, smap, cfg)}\nLiteral text of the drawing:\n{text}\n\n"
                 f"Already reported: {known or 'nothing'}\n\n"
                 f"List up to {max_items} OTHER problems a QA engineer would mark on this drawing's text "
-                "(wrong or inconsistent names, wrong item for a note, unclear or incomplete notes, a "
-                "title-block value that cannot be right). Quote the exact text. Empty list if none.")
+                "(a note naming a part differently from its exact BOM name, a wrong item for a note, a "
+                "misspelt word, an unclear or incomplete note, a title-block value that cannot be right). "
+                "Quote the exact text. Follow the policy and house rules; empty list only if the text is clean.")
         try:
             ans = client.ask(SYSTEM, user, schema, max_tokens=100 + 80 * max_items)
         except ModelError as e:

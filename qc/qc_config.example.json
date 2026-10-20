@@ -1,4 +1,5 @@
 {
+  "verdicts_dir": "C:\\qc-verdicts",
   "model": {"name": "gemma4:26b", "seconds_per_call": 300, "vision": true, "doubt_passes": 2},
   "shop_words": ["KAPTON", "LITZ", "PREFORM"],
   "severity": {"B3": "must", "C7": "look"},
