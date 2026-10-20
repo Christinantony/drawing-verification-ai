@@ -201,6 +201,12 @@ def review(args) -> int:
                 log(f"    {q.number or q.file}: title block does not make sense ({'; '.join(why)[:110]}) - "
                     "not re-checked (needs the model with images)")
 
+    if steps.get("second_look") and getattr(client, "vision", False) and steps.get("layout"):
+        from .look import read_tables
+        step("tables")
+        read_tables(sheets, client, log)
+        done("tables")
+
     from .pm import resolve as resolve_pm
     pm_findings = resolve_pm(sheets, client if not args.no_model else NoModel(), log,
                              vision=bool(steps.get("layout") is not False and getattr(client, "vision", False)
@@ -261,7 +267,12 @@ def review(args) -> int:
             findings += extra
             done("open_review")
             log(f"    open review: {len(extra)} model observation(s)")
-            silence(extra, verdicts, smap, cfg, log)
+        if steps.get("second_look") and getattr(client, "vision", False):
+            from .look import second_look
+            step("second_look")
+            second_look(findings, client, cfg, log, max_looks=cfg.get("second_look_max", 40))
+            done("second_look")
+        silence(findings, verdicts, smap, cfg, log)
         if steps.get("summary"):
             step("summary")
             summary = draft_summary(sheets, findings, client, log)
@@ -417,7 +428,7 @@ def main(argv=None) -> int:
     r.add_argument("--policy", help="your QC policy document (default qc/policy.md)")
     r.add_argument("--examples", nargs="*", help="findings.csv files with your verdicts, used as examples")
     r.add_argument("--verdicts", help="your verdicts folder (marked findings.csv files + house_rules.md)")
-    r.add_argument("--skip", help="model steps to skip, comma separated: layout,tb_check,judge,doubt,decide,open_review,summary")
+    r.add_argument("--skip", help="model steps to skip, comma separated: layout,tb_check,judge,doubt,decide,open_review,second_look,summary")
     d = sub.add_parser("doctor", help="check the setup: packages, Tesseract, Ollama, the model")
     d.add_argument("--model")
     d.add_argument("--host")

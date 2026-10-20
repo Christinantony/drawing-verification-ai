@@ -146,32 +146,75 @@ def _read_call(q, client, region, kind):
     return client.ask(SYSTEM, user, schema, images=[img], max_tokens=420)
 
 
-def _on_sheet(q, value) -> bool:
-    if q.ocr:
-        return True                      # OCR text is itself uncertain: take the image reading
-    words = q.sheet.words
-    blob = alnum(" ".join(w.text for w in words))
-    return bool(alnum(value)) and alnum(value) in blob
+def compare(q, value, region=None):
+    """How the sheet's own text compares with a value the model read.
+    Returns (verdict, sheet_text):
+        'agree'      the same text is on the sheet
+        'ocr_unsure' OCR read something similar there with low confidence
+        'conflict'   OCR read something different there, confidently
+        'absent'     nothing like it on the sheet"""
+    import difflib
+    from sheetreader.cells import reading_order
+    want = alnum(value)
+    if not want:
+        return "absent", ""
+    words = [w for w in q.sheet.words
+             if region is None or (region[0] - 4 <= w.xc <= region[2] + 4 and region[1] - 4 <= w.yc <= region[3] + 4)]
+    if not q.ocr:
+        blob = alnum(" ".join(w.text for w in q.sheet.words))
+        return ("agree", value) if want in blob else ("absent", "")
+    n = max(1, len(value.split()))
+    best = (0.0, None)
+    for line in reading_order(words):
+        for i in range(len(line)):
+            for k in (n - 1, n, n + 1):
+                if k < 1 or i + k > len(line):
+                    continue
+                ws = line[i:i + k]
+                r = difflib.SequenceMatcher(None, want, alnum(" ".join(w.text for w in ws))).ratio()
+                if r > best[0]:
+                    best = (r, ws)
+    r, ws = best
+    if not ws or r < 0.5:
+        return "absent", ""
+    text = " ".join(w.text for w in ws)
+    if r >= 0.8:
+        return "agree", text
+    return ("ocr_unsure", text) if min(w.conf for w in ws) < 60 else ("conflict", text)
 
 
 def recheck(sheets, client, cfg, log) -> int:
-    """Re-read title blocks that do not make sense. Returns how many sheets
-    were re-checked."""
+    """Re-read title blocks whose contents do not make sense. Returns how
+    many sheets were re-checked.
+
+    The model's reading only fills fields that are empty or nonsense; it
+    never deletes what the code read, and the box only grows. A layout-check
+    opinion from the small whole-sheet image alone does not start a re-check:
+    at that size the model cannot read the text."""
     from .checks import locate
     from .sheets import Block, union
     n = 0
     for q in sheets:
         why = reasons(q, cfg)
-        q.tb_check = {"reasons": why, "changes": [], "kind": "drawing", "no_cell_for": [], "note": ""}
-        if not why:
+        q.tb_check = {"reasons": why, "changes": [], "kind": "drawing", "no_cell_for": [], "note": "",
+                      "conflicts": []}
+        if not [w for w in why if not w.startswith("layout check")]:
             continue
         n += 1
+        box = q.parts["title_block"].region
         try:
             loc = _locate_call(q, client)
             kind = loc.get("kind", "drawing")
-            box = q.parts["title_block"].region
-            box_wrong = not (box and loc.get("box_1_is_title_block"))
-            region = _frame_area(q, loc.get("area", "bottom-right")) if box_wrong else box
+            area = _frame_area(q, loc.get("area", "bottom-right"))
+            # read the code's box if the model agrees it is the title block,
+            # else the area it points to (always including the code's box
+            # when they overlap, so nothing is cut off)
+            if box and loc.get("box_1_is_title_block"):
+                region = box
+            elif box and not (area[2] < box[0] or box[2] < area[0] or area[3] < box[1] or box[3] < area[1]):
+                region = union([box, area])
+            else:
+                region = area
             ans = _read_call(q, client, region, kind)
         except ModelError as e:
             log(f"    title-block re-check not done for {q.number or q.file}: {e}")
@@ -184,37 +227,38 @@ def recheck(sheets, client, cfg, log) -> int:
             v = (v or "").strip()
             if f not in FIELDS or not v:
                 continue
-            if not _on_sheet(q, v):
+            old = (tb.get(f) or "").strip()
+            verdict, seen = compare(q, v, region)
+            if verdict == "absent" and not q.ocr:
                 q.tb_check["changes"].append(f"{f}: model read '{v[:40]}', not found in the sheet text - ignored")
                 continue
-            b = locate(q, v)
+            if verdict == "conflict":
+                if not old or _odd(f, old, q):
+                    q.tb_check["conflicts"].append({"field": f, "ocr": seen, "model": v})
+                continue
+            b = locate(q, seen if verdict != "absent" else v)
             if b:
                 boxes.append(b)
-            old = (tb.get(f) or "").strip()
-            # keep what the code read unless it was empty, did not make sense,
-            # or came from a box that was not the title block
-            if (not old or _odd(f, old, q) or box_wrong) and alnum(old) != alnum(v):
+            if (not old or _odd(f, old, q)) and alnum(old) != alnum(v):
                 tb[f] = v
-                q.tb_check["changes"].append(f"{f}: '{old[:30]}' -> '{v[:40]}'" if old else f"{f}: '{v[:40]}' (was empty)")
-        read = {f for f, v in (ans.get("fields") or {}).items() if f in FIELDS and (v or "").strip()}
-        if box_wrong and len(read) >= 3:
-            # what the code read came from the wrong box: keep only what the
-            # model confirmed
-            for f in FIELDS:
-                if f not in read and (tb.get(f) or "").strip():
-                    q.tb_check["changes"].append(f"{f}: '{tb[f][:30]}' removed (read from the wrong box)")
-                    tb[f] = ""
+                how = {"agree": "", "ocr_unsure": " (read on the image; OCR was unsure)",
+                       "absent": " (read on the image; OCR has nothing there)"}[verdict]
+                q.tb_check["changes"].append((f"{f}: '{old[:30]}' -> '{v[:40]}'" if old else
+                                              f"{f}: '{v[:40]}' (was empty)") + how)
         q.tb_check["no_cell_for"] = [f for f in ans.get("no_cell_for") or [] if f in FIELDS and not (tb.get(f) or "").strip()]
         q.tb_check["note"] = (ans.get("makes_sense") or "")[:160]
-        if len(boxes) >= 2:
-            new = union(boxes)
-            new = (new[0] - 6, new[1] - 6, new[2] + 6, new[3] + 6)
-            if new != q.parts["title_block"].region:
+        if boxes:
+            # grow the box to take in what the model found; never shrink it
+            new = union(boxes + ([box] if box else []))
+            if box is None or new != box:
+                new = (new[0] - 4, new[1] - 4, new[2] + 4, new[3] + 4) if box is None else new
                 q.parts["title_block"].region = new
                 q.blocks = [b for b in q.blocks if b.kind != "title_block"]
                 q.blocks.append(Block("title_block", new, [], {"source": "title-block re-check"}))
-                q.tb_check["changes"].append("title-block box redrawn around the values the model read")
+                q.tb_check["changes"].append("title-block box " + ("found" if box is None else "enlarged")
+                                             + " from the values the model read")
         log(f"    {q.number or q.file}: title block re-checked ({'; '.join(why)[:110]}) -> {kind}, "
-            f"{len([c for c in q.tb_check['changes'] if '->' in c or 'was empty' in c])} field(s) corrected"
+            f"{len([c for c in q.tb_check['changes'] if '->' in c or 'was empty' in c])} field(s) filled"
+            + (f", {len(q.tb_check['conflicts'])} for you to check" if q.tb_check["conflicts"] else "")
             + (f", no cell for {', '.join(q.tb_check['no_cell_for'])}" if q.tb_check["no_cell_for"] else ""))
     return n

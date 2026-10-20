@@ -102,6 +102,17 @@ def locate(sheet, text: str) -> Optional[tuple]:
 DOC_EXEMPT = ["material", "weight", "scale", "size", "sheet", "drawn_by", "checked_by"]
 
 
+def table_value(sheet, field: str) -> str:
+    """A title-block field given in a specification table on the sheet
+    (installation drawings give WEIGHT, FINISH there)."""
+    label = field.replace("_by", "").replace("_", " ").upper()
+    for t in sheet.record.get("tables") or []:
+        for k, v in (t.get("spec") or {}).items():
+            if v and (k == label or k.startswith(label + " ") or k.rstrip(".") == label):
+                return v
+    return ""
+
+
 def drawing_type(sheet, cfg) -> str:
     if getattr(sheet, "doc_kind", "") == "document":
         return "document"
@@ -232,7 +243,7 @@ def check_A(sheets, smap, cfg) -> List[Finding]:
         if dtype == "document" and s.page > 1:
             no_cell, exempt = set(), set(cfg["required_fields"]) | {"approval"}   # only page 1 has the header
         for f_ in cfg["required_fields"]:
-            if f_ in exempt or (tb.get(f_) or "").strip():
+            if f_ in exempt or (tb.get(f_) or "").strip() or table_value(s, f_):
                 continue
             label = f_.replace("_by", "").replace("_", " ").upper()
             if f_ in no_cell:
@@ -245,6 +256,13 @@ def check_A(sheets, smap, cfg) -> List[Finding]:
                                f"Title block has no {label}" + (" (read by OCR; may be a misread)" if s.ocr else "") + ".",
                                s, label, "title block", s.parts["title_block"].region,
                                doubt={"kind": "tb_field", "field": f_, "label": label}))
+        for c in (getattr(s, "tb_check", None) or {}).get("conflicts", []):
+            label = c["field"].replace("_by", "").replace("_", " ").upper()
+            out.append(Finding("A5", "look", "check",
+                               f"Title block {label}: OCR read '{c['ocr']}', the model read '{c['model']}' on the "
+                               "image. Check which is right.", s, c["ocr"], "title block",
+                               locate(s, c["ocr"]) or s.parts["title_block"].region,
+                               history=["title-block re-check: OCR and image disagree"]))
         if "approval" not in exempt and not any((tb.get(f_) or "").strip() for f_ in cfg["approval_fields"]):
             out.append(Finding("A5", _sev(cfg, "A5"), "doubt" if s.ocr else "fail",
                                "Title block has no APPROVED / VERIFIED signature.", s, "APPROVED", "title block",
@@ -470,11 +488,11 @@ def _see_target(s, what, tag, where) -> bool:
         label = field.group(1).replace("_BY", "")
         tb = s.parts["title_block"].region
         outside = [w for w in s.sheet.words if not (tb and tb[0] <= w.xc <= tb[2] and tb[1] <= w.yc <= tb[3])]
-        if s.record.get("bom") or any(label in w.text.upper() for w in outside):
+        if s.record.get("bom") or table_value(s, label.lower()) or any(label in w.text.upper() for w in outside):
             return True
     if what == "TABLE":
         if not tag:
-            return bool(s.record.get("bom")) or "TABLE" in words.replace("SEE TABLE", "")
+            return bool(s.record.get("bom") or s.record.get("tables")) or "TABLE" in words.replace("SEE TABLE", "")
         return bool(re.search(rf"\bTABLE\s*{re.escape(tag)}\b", re.sub(r"SEE\s+TABLE", "", words)))
     if what in ("DETAIL", "VIEW", "SECTION"):
         if not tag:
@@ -525,10 +543,18 @@ def check_D(sheets, cfg, smap=None) -> List[Finding]:
         # D5 legend <-> symbol
         legends = [l.text for b in s.blocks_of("legend") for l in b.lines]
         star_used = any(re.match(r"^\*\s*\d", w.text) for w in s.sheet.words)
-        star_legend = any(re.match(r"^['\"‘’`]?\*", t) for t in legends)
+        # the legend may sit anywhere: in the notes, a table, loose text. On a
+        # scanned sheet OCR often misreads the '*', so the phrase is enough.
+        meaning = (cfg.get("legends") or {}).get("*", "KEY CHARACTERISTICS")
+        all_text = " ".join(w.text for w in s.sheet.words).upper()
+        star_legend = any(re.match(r"^['\"‘’`]?\*", t) for t in legends) or \
+            bool(re.search(r"['\"‘’`]?\*['\"‘’`]?\s*[-–=:]\s*[A-Z]", all_text)) or \
+            (meaning and alnum(meaning)[:14] in alnum(all_text))
         if star_used and not star_legend:
-            out.append(Finding("D5", _sev(cfg, "D5"), "fail",
-                               "Dimensions are marked '*' but there is no '*' legend (e.g. '*' - KEY CHARACTERISTICS).", s, "*"))
+            out.append(Finding("D5", _sev(cfg, "D5"), "check" if s.ocr else "fail",
+                               f"Dimensions are marked '*' but there is no '*' legend (e.g. '*' - {meaning})"
+                               + (" (scanned sheet: OCR may have misread the legend)" if s.ocr else "") + ".", s, "*",
+                               "legend", None, ask={"second_look": "legend"}))
         if star_legend and not star_used and not s.ocr:
             out.append(Finding("D5", _sev(cfg, "D5"), "fail",
                                "The '*' legend is on the sheet, but no dimension is marked '*'.", s,
@@ -560,10 +586,17 @@ def check_D(sheets, cfg, smap=None) -> List[Finding]:
 def _mask(t, smap):
     """Replace drawing numbers with a placeholder: 'USE FILE <no>.STEP' notes
     differ only by number and are not wording differences."""
+    # file names (USE FILE <anything>.DXF) and any drawing, template or jig
+    # number of the product, written with or without the category letter
+    t = re.sub(r"[A-Z0-9]+(?:-[A-Z0-9&]+)+(?:\s+[A-Z0-9&\-]+){0,5}?\.(?:DXF|STEP|STP|IGS|IGES|DWG|RAR|SLDPRT|PDF)\b",
+               "#", t, flags=re.I)
     if smap is None:
         return t
     for pat in smap.patterns:
         t = pat.regex.sub("#", t)
+        if pat.core:
+            core = r"[\s\-–—]*".join(re.escape(c) for c in pat.core)
+            t = re.sub(r"[A-Z0-9]*(?:-[A-Z]{1,4})*-?\s*" + core + r"(?:[\s\-–—]+[A-Z0-9&]{1,4})*", "#", t, flags=re.I)
     return t
 
 

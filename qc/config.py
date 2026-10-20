@@ -17,11 +17,13 @@ DEFAULTS = {
         "doubt_passes": 2,
     },
     # Model steps (all on by default; --skip or --decide rules turn them off)
-    "model_steps": {"layout": True, "tb_check": True, "judge": True, "doubt": True, "decide": True, "open_review": True,
+    "model_steps": {"layout": True, "tb_check": True, "judge": True, "doubt": True, "decide": True, "open_review": True, "second_look": True,
                     "summary": True},
     "policy_file": None,       # None = qc/policy.md
     # Facts the model may re-word or re-grade but never drop: the engineer decides.
     "never_drop": ["A1", "A5", "A6", "B1", "B3", "C1", "C2", "C3", "C5", "C6", "D2", "D6", "E2"],
+    "legends": {"*": "KEY CHARACTERISTICS"},
+    "second_look_max": 40,     # most findings looked at again on the image per run   # what each mark on a dimension means
     "today": None,             # None = the computer's date (dates on drawings are DD/MM/YYYY)
     "examples": [],            # findings.csv files with your verdicts
     "verdicts_dir": None,      # your verdicts folder: every marked findings.csv in it + house_rules.md

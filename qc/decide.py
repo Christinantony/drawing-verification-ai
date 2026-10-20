@@ -92,6 +92,14 @@ def _sheet_context(s, smap=None, cfg=None) -> str:
         tables = (["the BOM table (its REF./MATERIAL column)"] if s.record.get("bom") else []) + \
                  (["a specification table"] if any(b.kind in ("table", "unplaced") for b in s.blocks) else [])
         lines.append("  SEE TABLE on this sheet refers to: " + (" or ".join(tables) or "no table found") + ".")
+    for t in (s.record.get("tables") or [])[:3]:
+        rows = [" | ".join(c for c in row if c) for row in (t.get("rows") or [])][:12]
+        if rows:
+            lines.append("  A ruled table on this sheet (each row: its cells, left to right; a cell's lines are "
+                         "joined): " + " // ".join(rows) + ".")
+    leg = (cfg or {}).get("legends") or {}
+    if leg:
+        lines.append("  Marks on dimensions: " + "; ".join(f"'{k}' = {v}" for k, v in leg.items()) + ".")
     if getattr(s, "pm", None):
         lines.append("  Values such as " + ", ".join(p["text"] for p in s.pm[:3]) + " are written with ± on the "
                      "drawing (the sign is a graphic); read them as value ± tolerance.")
@@ -184,8 +192,13 @@ def open_review(sheets, findings, client, policy, examples, log, max_items=8, sm
             parts.append(f"BOM {r.get('item') or '?'}: {r.get('description') or ''} | QTY {r.get('qty') or ''} | {r.get('ref') or ''}")
         for i, n in enumerate(s.notes, 1):
             parts.append(f"NOTE {n.number or i}: {n.text}")
+        for t in s.record.get("tables") or []:
+            for row in t.get("rows") or []:
+                if any(row):
+                    parts.append("TABLE ROW: " + " | ".join(c for c in row if c))
         for b in s.blocks:
-            if b.kind in ("view_label", "legend", "callout", "unplaced", "annotation"):
+            if b.kind in ("view_label", "legend", "callout", "unplaced", "annotation") or \
+                    (b.kind == "table" and "rows" not in b.meta):
                 for l in b.lines:
                     parts.append(f"{b.kind.upper().replace('_', ' ')}: {l.text}")
         text = "\n".join(parts)[:3500]

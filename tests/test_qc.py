@@ -595,3 +595,164 @@ def test_document_pages_are_not_held_to_a_drawing_title_block(tmp_path):
     assert not any(w in m for m in msgs for w in ("MATERIAL", "WEIGHT", "SCALE"))
     q.page = 2
     assert not [f for f in run_all([q], SetMap([q]), cfg) if f.code == "A5"]
+
+
+# ---------------------------------------------------------------------------
+# Tables, notes, legend, second look - text-layer and scanned sheets
+# ---------------------------------------------------------------------------
+from conftest import requires_tesseract  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def cases(tmp_path_factory):
+    from make_qc_set import make_cases
+    d = tmp_path_factory.mktemp("cases")
+    make_cases(str(d / "AB-CD 10-E-05 REV.00.pdf"))
+    return read_pdf(d / "AB-CD 10-E-05 REV.00.pdf")[0]
+
+
+def _check_case_sheet(q, ocr=False):
+    t = q.record["tables"]
+    assert len(t) == 1 and len(t[0]["rows"]) == 5
+    spec = t[0]["spec"]
+    assert "2.5:1 FOR FULL BAND" in spec["VSWR"] and spec["VSWR"].startswith("1.8:1 FOR 90% OF BAND")
+    assert spec["FINISH"] == "CLEAR ANODISED"                      # nothing from the title block glued on
+    assert [n.text for n in q.notes] == [f"USE FILE {q.number}.STEP FOR MACHINING"]  # legend, view text, CL left out
+    assert q.blocks_of("legend")
+    cfg = config.load()
+    fs = run_all([q], SetMap([q]), cfg)
+    codes = {f.code for f in fs if f.status in ("fail", "check", "doubt", "ask") and f.code in ("D1", "D5")}
+    assert not codes, [f.message for f in fs if f.code in codes]
+    assert not [f for f in fs if f.code == "A5" and "WEIGHT" in f.message]   # WEIGHT is in the table
+
+
+def test_spec_table_is_read_by_its_cells(cases):
+    _check_case_sheet(cases)
+
+
+@requires_tesseract
+def test_spec_table_is_read_by_its_cells_on_a_scan(tmp_path):
+    from make_qc_set import make_cases
+    p = tmp_path / "AB-CD 10-E-06 REV.00.pdf"
+    make_cases(str(p), "AB-CD 10-E-06", scanned=True)
+    q = read_pdf(p)[0]
+    assert q.ocr
+    rows = q.record["tables"][0]["rows"]
+    assert len(rows) == 5
+    vswr = next(r for r in rows if any("VSWR" in c for c in r))
+    assert any("2.5:1 FOR FULL BAND" in c and "1.8:1" in c for c in vswr)
+    assert [n.text for n in q.notes] == ["USE FILE AB-CD 10-E-06.STEP FOR MACHINING"]
+    fs = run_all([q], SetMap([q]), config.load())
+    assert not [f for f in fs if f.code == "D5" and "no '*' legend" in f.message]
+
+
+def test_note_numbers_are_not_values():
+    from qc.sheets import NOTE_NUM, _real_words
+    assert not NOTE_NUM.match("1.8:1 FOR 100% OF BAND")
+    assert not NOTE_NUM.match("1.5 MM THICK")
+    assert NOTE_NUM.match("1. BREAK ALL SHARP EDGES").group(1) == "1"
+    assert NOTE_NUM.match("(3) APPLY ITEM 4").group(1) == "3"
+    assert not _real_words("CL 5.0") and _real_words("BREAK EDGES")
+
+
+def test_note_wording_ignores_drawing_and_file_numbers():
+    from qc.checks import _mask, _norm
+    from qc.setmap import learn_patterns
+
+    class S:
+        patterns = learn_patterns(["XY-AB 12 C-E-01", "XY-AB 12 C-E-02", "XY-AB 12 C-E-13"])
+    a = _norm(_mask("USE FILE XY-AB 12 C-15.DXF FOR LASER CUTTING", S))
+    b = _norm(_mask("USE FILE XY-AB 12 C-E-18.DXF FOR LASER CUTTING", S))
+    c = _norm(_mask("USE TEMPLATE XY-TP-AB 12 C-13 FOR CUTTING", S))
+    assert a == b and "AB" not in c
+
+
+class LookModel(FakeModel):
+    def __init__(self, verdict="not_a_problem", text=""):
+        super().__init__()
+        self.verdict, self.text, self.images = verdict, text, 0
+
+    def ask(self, system, user, schema, images=None, max_tokens=300):
+        props = schema["properties"]
+        if "verdict" in props:
+            assert images
+            self.images += len(images)
+            return {"verdict": self.verdict, "text": self.text, "reason": "the value is in the next cell"}
+        if "is_table" in props:
+            return {"is_table": True, "rows": [["1.", "MOUNTING"], ["2.", "SCREWS"]]}
+        return super().ask(system, user, schema, images, max_tokens)
+
+
+def test_second_look_clears_what_the_image_does_not_show(cases):
+    from qc.look import second_look
+    q = cases
+    f = Finding("D4", "look", "fail", "Note 2 is incomplete: 'VSWR' value is missing.", q, "VSWR", "note 2")
+    g = Finding("D4", "look", "fail", "Note 1 unclear.", q, f"USE FILE {q.number}.STEP FOR MACHINING", "note 1")
+    m = LookModel()
+    assert second_look([f], m, config.load(), lambda *_: None) == 1
+    assert f.status == "cleared" and "next cell" in f.history[-1] and m.images >= 1
+    second_look([g], LookModel("confirmed"), config.load(), lambda *_: None)
+    assert g.status == "fail" and "confirmed" in g.history[-1]
+    # never twice
+    assert second_look([g], LookModel(), config.load(), lambda *_: None) == 0
+
+
+def test_model_table_reading_is_used_only_when_it_matches_the_sheet(qcset):
+    from qc.look import read_tables
+    _, sheets, _ = qcset
+    q = next(s for s in read_pdf(sheets[1].path))       # a fresh copy: notes 'USE FILE ...', 'BREAK ALL ...'
+    b = q.blocks_of("notes")[0]
+    q.layout = {"blocks": [(b, "table")], "disagree": []}
+    n_before = len(q.notes)
+    assert read_tables([q], LookModel(), lambda *_: None) == 0       # the model's cells are not on the sheet
+    assert len(q.notes) == n_before and b in q.blocks
+
+
+def test_model_table_reading_replaces_notes_when_it_matches(qcset):
+    from qc.look import read_tables
+    _, sheets, _ = qcset
+    q = read_pdf(sheets[1].path)[0]
+    b = q.blocks_of("notes")[0]
+    q.layout = {"blocks": [(b, "table")], "disagree": []}
+
+    class M(LookModel):
+        def ask(self, system, user, schema, images=None, max_tokens=300):
+            if "is_table" in schema["properties"]:
+                return {"is_table": True, "rows": [["1.", f"USE FILE {q.number}.STEP FOR MACHINING"],
+                                                   ["2.", "BREAK ALL SHARP EDGES"]]}
+            return super().ask(system, user, schema, images, max_tokens)
+    assert read_tables([q], M(), lambda *_: None) == 1
+    assert not q.notes and q.record["tables"][-1]["rows"][1][1] == "BREAK ALL SHARP EDGES"
+
+
+def test_title_block_recheck_never_deletes_what_the_code_read(tmp_path):
+    from qc.tbcheck import recheck
+    q = _part(tmp_path)[0]
+    cfg = config.load()
+    tb = q.record["title_block"]
+    tb.update(drawing_number="", title="", scale="")
+    before_box = q.parts["title_block"].region
+    recheck([q], TbModel(box_ok=False), cfg, lambda *_: None)
+    assert tb["drawn_by"] == "A.B" and tb["material"] == "AL 6061-T6"      # kept
+    assert tb["drawing_number"] == "AB-CD 10-E-02"                          # filled
+    nb = q.parts["title_block"].region
+    assert nb[0] <= before_box[0] and nb[2] >= before_box[2]                 # never shrinks
+
+
+def test_layout_opinion_alone_does_not_start_a_recheck(tmp_path):
+    from qc.tbcheck import recheck
+    q = _part(tmp_path)[0]
+    q.layout = {"disagree": ["box 1 (title_block) looks like notes to the model: ''"], "blocks": []}
+    m = TbModel()
+    assert recheck([q], m, config.load(), lambda *_: None) == 0 and m.calls == 0
+
+
+@requires_tesseract
+def test_ocr_and_image_disagreement_goes_to_check_by_hand(tmp_path):
+    from qc.tbcheck import compare
+    from make_qc_set import make_cases
+    p = tmp_path / "AB-CD 10-E-06 REV.00.pdf"
+    make_cases(str(p), "AB-CD 10-E-06", scanned=True)
+    q = read_pdf(p)[0]
+    assert compare(q, "AB-CD 10-E-06")[0] == "agree"
+    assert compare(q, "ZZ-QQ 99-K-77")[0] in ("absent", "conflict")

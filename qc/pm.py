@@ -31,6 +31,11 @@ def _candidates(q):
             yield f"title block {k.upper()}", (lambda k=k: tb[k]), (lambda v, k=k: tb.__setitem__(k, v))
     for i, n in enumerate(q.notes):
         yield f"note {n.number or i + 1}", (lambda n=n: n.text), (lambda v, n=n: setattr(n, "text", v))
+    for t in q.record.get("tables") or []:
+        for row in t.get("rows") or []:
+            for j in range(len(row)):
+                if row[j]:
+                    yield "table", (lambda row=row, j=j: row[j]), (lambda v, row=row, j=j: row.__setitem__(j, v))
     for r in q.record.get("bom") or []:
         for k in ("qty", "description", "ref"):
             if r.get(k):
@@ -92,6 +97,9 @@ def resolve(sheets, client, log, vision: bool) -> list:
         if q.pm:
             n_conf = sum(p["verdict"] == "confirmed" for p in q.pm)
             log(f"    {q.number}: {len(q.pm)} ± value(s) " + (f"({n_conf} confirmed on the image)" if vision else "(read as ±, not checked)"))
+        from .sheets import table_spec
+        for t in q.record.get("tables") or []:
+            t["spec"] = table_spec(t.get("rows") or [])
         # keep the record's notes list in step with the Note objects
         q.record["notes"] = [n.text for n in q.notes]
     return findings

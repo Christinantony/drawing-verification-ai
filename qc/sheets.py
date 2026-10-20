@@ -143,7 +143,13 @@ class QCSheet:
 NOTE_HEAD = re.compile(r"^NOTES?\s*:?$", re.I)
 # Other headed text blocks, read the same way as notes.
 TEXT_HEAD = re.compile(r"^(?:INSTALLATION\s+)?INSTRUCTIONS?\s*:?$|^[A-Z]+\s+DETAILS\s*:?$|^SPECIFICATIONS?\s*:?$", re.I)
-NOTE_NUM = re.compile(r"^\(?(\d{1,2})\)?[.):]\s*(?:[.)]\s*)?(.*)$")
+# A note number: '1.', '1)', '(1)', '1:' followed by a word - not '1.8:1 FOR'
+# or '1.5 MM', which are values.
+NOTE_NUM = re.compile(r"^\(?(\d{1,2})\)?(?:[.)]|:(?=\s))(?![\d:])\s*(?:[.)]\s*)?(.*)$")
+# A legend line whose mark OCR lost or misread: "+' - KEY CHARACTERISTICS"
+LEGEND_WORDS = re.compile(r"^\W{0,6}(?:[A-Z0-9]{1,2}\W{0,3})?[-–=:]?\s*(KEY\s+CHARACTERISTICS?|CRITICAL\s+DIMENSIONS?)\s*$", re.I)
+# OCR misreads of a note number: 'l.', 'I.', '1,'
+OCR_NUM = re.compile(r"^[lI|]([.,)]\s)|^(\d{1,2}),(\s)")
 BULLET = re.compile(r"^(?:[•·\-–*]|e|o|°)\s+(.*)$")
 CALLOUT = re.compile(r"(Ø|⌀|\bDIA\b|\bTHRU\b|\bCSK\b|C'?BORE|COUNTER\s*BORE|\bTAPPED\b|\bDEEP\b|"
                      r"\bM\d+(\.\d+)?\b(?!\s*SS)|\bHOLES?\b|\bDRILL\b|\bSPOT\s*FACE\b)", re.I)
@@ -282,7 +288,7 @@ def _notes(q: QCSheet, taken) -> None:
                 continue
             if l.bbox[1] - last_y > 2.6 * lh:
                 break
-            if l.bbox[0] > h.x0 + 40 * lh:   # far to the right: a different block
+            if l.bbox[0] > h.x0 + 18 * lh:   # far to the right: view text, a different block
                 continue
             kept.append(l)
             last_y = max(last_y, l.bbox[3])
@@ -300,29 +306,147 @@ def _notes(q: QCSheet, taken) -> None:
         split_notes(q, kept, bi, lh)
 
 
+def _real_words(t: str) -> bool:
+    """A note has words: 'CL 5.0' or '5' is a mark, not a note."""
+    words = re.findall(r"[A-Za-z]{2,}", t)
+    return len(words) >= 2 or any(len(w) >= 5 for w in words)
+
+
 def split_notes(q: QCSheet, lines: List[Line], block_index: int, lh: float) -> None:
     """Lines of a notes block -> Note objects: a numbered or bulleted line
-    starts a new note, anything else continues the previous one."""
+    starts a new note; a line continues the previous note only if it starts
+    under that note's text and follows it closely. A legend line
+    ("'*' - KEY CHARACTERISTICS") is a legend, not part of a note."""
     cur: Optional[Note] = None
+    text_x0 = None
     for l in sorted(lines, key=lambda l: (l.bbox[1], l.bbox[0])):
         t = l.text.strip()
+        if q.ocr:
+            t = OCR_NUM.sub(lambda m: ("1" + m.group(1)) if m.group(1) else (m.group(2) + "." + m.group(3)), t, count=1)
+        if LEGEND.match(t) or LEGEND_WORDS.match(t):
+            q.blocks.append(Block("legend", l.bbox, [l], {"source": "notes block"}))
+            cur = None
+            continue
         m = NOTE_NUM.match(t)
         b = BULLET.match(t)
         if m and m.group(2):
             cur = Note(m.group(1), m.group(2).strip(), l.bbox, block_index, l.conf)
             q.notes.append(cur)
+            text_x0 = _text_start(l, m.group(2))
         elif b:
             cur = Note(None, b.group(1).strip(), l.bbox, block_index, l.conf)
             q.notes.append(cur)
-        elif cur is not None and l.bbox[1] - cur.bbox[3] < 1.6 * lh:
+            text_x0 = _text_start(l, b.group(1))
+        elif (cur is not None and l.bbox[1] - cur.bbox[3] < 1.6 * lh
+              and (text_x0 is None or text_x0 - 3 * lh <= l.bbox[0] <= text_x0 + 3 * lh)):
             cur.text = (cur.text + " " + t).strip()
             cur.bbox = union([cur.bbox, l.bbox])
             cur.conf = min(cur.conf, l.conf)
         else:
             cur = Note(None, t, l.bbox, block_index, l.conf)
             q.notes.append(cur)
-    # A "note" with no word in it ('5', 'A') is a stray balloon or zone mark.
-    q.notes = [n for n in q.notes if re.search(r"[A-Za-z]{2,}", n.text)]
+            text_x0 = l.bbox[0]
+    # A "note" with no words in it ('5', 'A', 'CL 5.0') is a mark, not a note.
+    q.notes = [n for n in q.notes if _real_words(n.text)]
+
+
+def _text_start(l: Line, rest: str) -> float:
+    """x where the note's text starts (after its number or bullet)."""
+    first = (rest.split() or [""])[0]
+    for w in l.words:
+        if w.text == first or (first and w.text.endswith(first)):
+            return w.x0
+    return l.bbox[0]
+
+
+NUMBERING = re.compile(r"^\(?\d{1,2}[.)]?\)?$")
+
+
+def _cell_text(words) -> str:
+    return " ".join(" ".join(w.text for w in ln) for ln in reading_order(words)).strip()
+
+
+def table_spec(grid) -> dict:
+    """LABEL -> value for the rows of a parameter / value table."""
+    spec = {}
+    for row in grid:
+        vals = [t for t in row if t]
+        if vals and NUMBERING.match(vals[0]):
+            vals = vals[1:]
+        if len(vals) >= 2 and re.search(r"[A-Za-z]{2,}", vals[0]):
+            spec[vals[0].upper().strip(" :")] = " ".join(vals[1:])
+    return spec
+
+
+def _tables(q: QCSheet, regions: List[BBox]) -> List[Block]:
+    """Ruled tables that are not the title block, BOM or revision table: a
+    specification table (1. FREQUENCY | 1-6 GHz ...), a table of values.
+    Found from the ruled cells - on a text-layer sheet the PDF's own lines,
+    on a scanned sheet the lines found in the image - so a value in the
+    next cell stays with its label and a two-line cell stays one value."""
+    sh = q.sheet
+    W, H = sh.width, sh.height
+    tol = 2.5
+    fx0, fy0, fx1, fy1 = q.frame
+
+    def free(c):
+        if not (fx0 <= c.xc <= fx1 and fy0 <= c.yc <= fy1):
+            return False
+        return not any(r[0] - 1 <= c.xc <= r[2] + 1 and r[1] - 1 <= c.yc <= r[3] + 1 for r in regions)
+
+    cells = [c for c in q.parts.get("cells") or []
+             if 6 < c.width < 0.45 * W and 6 < c.height < 0.2 * H and free(c)]
+    # runs: cells side by side on one row, edge to edge
+    rows = []
+    for c in sorted(cells, key=lambda c: (round(c.y0), c.x0)):
+        for r in rows:
+            if abs(r[0].y0 - c.y0) < tol and abs(r[0].y1 - c.y1) < tol and abs(r[-1].x1 - c.x0) < tol:
+                r.append(c)
+                break
+        else:
+            rows.append([c])
+    runs = [r for r in rows if len(r) >= 2]
+    # tables: runs stacked edge to edge with the same column edges
+    tables, used = [], set()
+    for r in sorted(runs, key=lambda r: r[0].y0):
+        if id(r[0]) in used:
+            continue
+        chain = [r]
+        used.add(id(r[0]))
+        while True:
+            last = chain[-1]
+            edges = [c.x0 for c in last] + [last[-1].x1]
+            nxt = [x for x in runs if id(x[0]) not in used and abs(x[0].y0 - last[0].y1) < tol
+                   and len(x) == len(last) and all(abs(a - b) < tol * 2
+                                                    for a, b in zip(edges, [c.x0 for c in x] + [x[-1].x1]))]
+            if not nxt:
+                break
+            chain.append(nxt[0])
+            used.add(id(nxt[0][0]))
+        if len(chain) >= 2:
+            tables.append(chain)
+    out = []
+    for chain in tables:
+        grid = []
+        n_words = n_inside = 0
+        for run in chain:
+            row = []
+            for c in run:
+                ws = [w for w in sh.words if w.horizontal and c.x0 <= w.xc <= c.x1 and c.y0 <= w.yc <= c.y1]
+                n_words += len(ws)
+                n_inside += sum(c.x0 - 1 <= w.x0 and w.x1 <= c.x1 + 1 for w in ws)
+                row.append(_cell_text(ws))
+            grid.append(row)
+        filled = sum(bool(t) for row in grid for t in row)
+        if filled < 0.5 * sum(len(row) for row in grid) or sum(sum(bool(t) for t in row) >= 2 for row in grid) < 2:
+            continue
+        if n_words and n_inside < 0.8 * n_words:
+            continue   # text running across the lines: geometry in a view, not a table
+        bbox = union([c.bbox for run in chain for c in run])
+        lines = [Line(" | ".join(t for t in row), union(c.bbox for c in run), [], 100.0)
+                 for row, run in zip(grid, chain)]
+        out.append(Block("table", bbox, lines, {"rows": grid, "spec": table_spec(grid), "source": "ruled cells"}))
+    return out
 
 
 def taken_boxes(q: QCSheet) -> List[BBox]:
@@ -342,6 +466,8 @@ def add_block(q: QCSheet, area: BBox, kind: str, source: str = "layout judge") -
              if any(len(re.sub(r"[^A-Za-z0-9]", "", w.text)) >= 2 for w in l.words)]
     if not lines:
         return None
+    if kind == "notes" and not _real_words(" ".join(l.text for l in lines)):
+        return None   # 'CL 5.0', a centre-line mark: not notes
     box = union(l.bbox for l in lines)
     # free the same words from any 'unplaced' block they were in
     for b in q.blocks_of("unplaced"):
@@ -459,6 +585,11 @@ def locate(q: QCSheet) -> None:
             if box:
                 q.blocks.append(Block(kind, box, [], {"rows": len(t.rows), "header_at": t.header_at}))
                 regions.append(box)
+    for t in _tables(q, list(regions)):
+        q.blocks.append(t)
+        regions.append(t.bbox)
+    q.record["tables"] = [{"rows": t.meta["rows"], "spec": t.meta["spec"]} for t in q.blocks_of("table")
+                          if "rows" in t.meta]
 
     def taken(w) -> bool:
         return any(inside(w, b, 1.0) for b in regions)
