@@ -91,7 +91,7 @@ def ask_layout(q, client):
 
 def judge_layout(sheets, client, log) -> None:
     for q in sheets:
-        q.layout = {"changes": [], "disagree": [], "added": [], "seconds": 0}
+        q.layout = {"changes": [], "disagree": [], "added": [], "seconds": 0, "blocks": []}
         try:
             blocks, ans, secs = ask_layout(q, client)
         except ModelError as e:
@@ -122,6 +122,7 @@ def judge_layout(sheets, client, log) -> None:
                 q.layout["changes"].append(f"'{b.text[:50]}' is {kind.replace('_', ' ')}")
             elif b.kind != "unplaced":
                 q.layout["disagree"].append(f"box {n + 1} ({code_kind}) looks like {kind} to the model: '{(b.text or '')[:50]}'")
+                q.layout["blocks"].append((b, kind))
         for m in ans.get("missing", [])[:4]:
             if m["kind"] in ("other", "title_block", "bom", "revision_table"):
                 if m["kind"] != "other":

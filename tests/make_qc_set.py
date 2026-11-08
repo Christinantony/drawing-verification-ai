@@ -45,7 +45,8 @@ def _title_block(p, number, title, material, finish, weight="12±1 g", next_assy
     for x in (610, 660, 710, 770):
         _v(p, x, 490, 510)
     for x, lab, val in ((563, "DRAWN", "A.B"), (613, "CHECKED", "C.D"), (663, "APPROVED", "E.F"),
-                        (713, "WEIGHT", weight), (773, "SCALE", scale)):
+                        (713, "WEIGHT" if weight is not None else "VERIFIED", weight if weight is not None else "G.H"),
+                        (773, "SCALE", scale)):
         _t(p, x, 497, lab, 6)
         _t(p, x + 3, 507, val)
     _t(p, 563, 520, "TITLE :", 6)
@@ -128,3 +129,52 @@ def make_set(folder):
     make_assembly(str(folder / "AB-CD 10-E-01 REV.00.pdf"))
     make_part(str(folder / "AB-CD 10-E-02 REV.00.pdf"), "AB-CD 10-E-02", "BASE PLATE")
     make_part(str(folder / "AB-CD 10-E-03 REV.00.pdf"), "AB-CD 10-E-03", "CLAMP")
+
+
+def make_cases(path, number="AB-CD 10-E-05", scanned=False):
+    """One sheet with the layouts that fooled the reader on a real set:
+    a ruled specification table (a two-line cell, '1.8:1' at the start of a
+    value, WEIGHT given in the table, FINISH in the row right above the title
+    block), a title block with no WEIGHT cell, a bulleted note with the '*'
+    legend under it and view text to its right, a '*' dimension, and a
+    centre-line mark 'CL'."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=W, height=H)
+    _frame(p)
+    _t(p, 300, 18, "AB-F-DRG-01 REV.00", 6)
+    # specification table, right above the title block
+    x = [560, 590, 680, 812]
+    rows = [("1.", "FREQUENCY", ["1-6 GHz"]), ("2.", "VSWR", ["1.8:1 FOR 90% OF BAND &", "2.5:1 FOR FULL BAND"]),
+            ("3.", "CONNECTOR", ["TNC MALE"]), ("4.", "WEIGHT", ["45±5 g"]), ("5.", "FINISH", ["CLEAR ANODISED"])]
+    y, rh = 352, 22
+    _h(p, x[0], x[-1], y)
+    for k, (n, lab, val) in enumerate(rows):
+        y0 = y + k * rh
+        _h(p, x[0], x[-1], y0 + rh)
+        _t(p, x[0] + 4, y0 + 14, n, 7)
+        _t(p, x[1] + 4, y0 + 14, lab, 7)
+        for j, v in enumerate(val):
+            _t(p, x[2] + 4, y0 + (9 if len(val) > 1 else 14) + 9 * j, v, 7)
+    for xx in x:
+        _v(p, xx, y, y + rh * len(rows))
+    # notes: a bullet, the legend, and view text to the right on the same rows
+    _t(p, 60, 300, "NOTE:", 8)
+    _t(p, 62, 315, "\u2022", 7)
+    _t(p, 80, 315, "USE FILE " + number + ".STEP FOR MACHINING", 7)
+    _t(p, 80, 335, "'*' - KEY CHARACTERISTICS", 7)
+    _t(p, 330, 335, "DETAIL B", 7)
+    _t(p, 335, 320, "R1.0", 7)
+    _t(p, 200, 200, "*32.0", 8)
+    _t(p, 100, 120, "CL", 7)
+    _title_block(p, number, "INSTALLATION DRAWING", "SEE TABLE", "SEE TABLE", weight=None)
+    if scanned:
+        pix = p.get_pixmap(dpi=200)
+        img_doc = pymupdf.open()
+        q = img_doc.new_page(width=W, height=H)
+        q.insert_image(q.rect, stream=pix.tobytes("png"))
+        img_doc.save(path)
+        img_doc.close()
+        doc.close()
+        return
+    doc.save(path)
+    doc.close()
